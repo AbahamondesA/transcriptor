@@ -1,0 +1,9 @@
+faster-whisper>=1.1.0
+numpy
+soundcard>=0.4.3
+yt-dlp[default]
+deno
+python-docx
+tkinterdnd2
+imageio-ffmpeg
+sentencepiece

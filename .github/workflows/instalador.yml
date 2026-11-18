@@ -1,0 +1,83 @@
+name: Crear instalador de Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Verificar dependencias
+        run: python -c "import numpy, av, ctranslate2, faster_whisper, sentencepiece, onnxruntime, soundcard, tkinterdnd2, imageio_ffmpeg, yt_dlp, docx; print('entorno OK')"
+
+      - name: Empaquetar Transcriptor.exe
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name Transcriptor --icon transcriptor.ico
+          --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --collect-all onnxruntime
+          --collect-all tkinterdnd2 --collect-all imageio_ffmpeg --collect-all yt_dlp --collect-all yt_dlp_ejs
+          --collect-all soundcard --collect-all sentencepiece --collect-all tokenizers --collect-all numpy
+          --collect-data docx --collect-submodules huggingface_hub
+          --hidden-import tkinter.colorchooser --hidden-import tkinter.font
+          transcriptor.py
+
+      - name: Incluir Deno (necesario para YouTube)
+        shell: python
+        run: |
+          import shutil
+          d = shutil.which("deno")
+          print("deno:", d)
+          if d:
+              shutil.copy(d, "dist/Transcriptor/")
+
+      - name: Autoprueba del .exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Transcriptor\Transcriptor.exe" -ArgumentList "--autoprueba", "$PWD\autoprueba.txt" -Wait -PassThru
+          Get-Content autoprueba.txt
+          if ($p.ExitCode -ne 0) { throw "La autoprueba del .exe falló" }
+
+      - name: Crear instalador (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc transcriptor.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup falló" }
+
+      - name: Versión portable
+        shell: pwsh
+        run: Compress-Archive -Path dist\Transcriptor -DestinationPath Transcriptor-portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Transcriptor-Windows
+          path: |
+            instalador/Transcriptor-Setup.exe
+            Transcriptor-portable.zip
+            autoprueba.txt
+
+      - name: Publicar versión (solo con etiqueta v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            instalador/Transcriptor-Setup.exe
+            Transcriptor-portable.zip

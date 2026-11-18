@@ -1,0 +1,56 @@
+TRANSCRIPTOR — archivos, enlaces y reuniones en vivo
+====================================================
+
+INSTALACIÓN (una sola vez)
+1. Instala Python 3.11 o 3.12 desde https://www.python.org (marca "Add python.exe to PATH").
+2. Doble clic en instalar.bat (tarda unos minutos).
+3. Abre la aplicación con iniciar.bat.
+   La primera vez que transcribas se descarga el modelo elegido (small ≈ 500 MB).
+
+LAS TRES FORMAS DE USO
+1 · Archivo: videos o audios de cualquier carpeta o unidad (escritorio, USB, red).
+    - Botón Examinar (puedes elegir varios a la vez: quedan en cola).
+    - Arrastra archivos o carpetas completas a la ventana.
+    - Clic derecho en cualquier video > Enviar a > Transcriptor.
+    El texto va apareciendo mientras se procesa; cada uno se guarda en TXT y SRT.
+2 · Enlace: pega un enlace de YouTube, Vimeo, Facebook, etc. Se descarga y se transcribe.
+    Al terminar, "Ver video con transcripción sincronizada" abre el video con el texto
+    al lado: la frase actual se resalta, puedes hacer clic en una línea para saltar a ese
+    momento y buscar palabras. También deja un .srt junto al video (VLC lo carga solo).
+3 · En vivo: transcribe lo que suena en el computador (Meet, Zoom, Teams, Webex,
+    llamadas por WhatsApp Web, un video de YouTube, cualquier cosa) y opcionalmente tu
+    micrófono, etiquetando "Reunión" y "Yo". El texto aparece a los pocos segundos.
+    "Subtítulos flotantes" abre una franja siempre visible sobre cualquier ventana.
+    Si activas tu micrófono, usa audífonos para que no se duplique lo que dicen los demás.
+
+TRADUCTOR INGLÉS ↔ ESPAÑOL (sin internet una vez descargado)
+- Pestaña 4 · Traductor: pega o escribe cualquier texto y presiona Traducir (o Ctrl+Enter).
+  Sentido: Inglés → Español, Español → Inglés o Detectar automáticamente.
+  "Usar la transcripción" trae el texto transcrito; "⇄ Intercambiar" invierte.
+- "Traducir transcripción…" (sobre el texto): traduce todas las frases. Con el selector
+  "Mostrar y exportar" eliges Original, Traducción o Ambos; eso es lo que se guarda en
+  TXT/SRT/Word, se ve en el visor y se estampa en el video (Ambos = subtítulos bilingües).
+- Directo en el texto: selecciona una o varias líneas de la transcripción (o haz clic en
+  una) y usa clic derecho → "Traducir … (agregar debajo)" o "(reemplazar el texto)",
+  eligiendo el sentido. Ctrl+T traduce la selección al instante. Desde el mismo menú:
+  Restaurar texto original, Quitar traducción, Editar línea y Copiar.
+- En vivo: marca "Traducir en vivo" para ver la traducción de cada frase de la reunión.
+- La primera vez se descarga cada sentido (~150 MB). Modelos OPUS-MT (U. de Helsinki).
+
+VIDEO CON SUBTÍTULOS INTEGRADOS
+- Después de transcribir un video (archivo o enlace), usa "Descargar video con subtítulos".
+  Se abre un editor con vista previa real donde controlas tipo de letra, tamaño,
+  negrita/cursiva/mayúsculas, color del texto, forma (caja, contorno, sombra),
+  color y grosor del borde, opacidad, posición y separación; tu formato queda
+  guardado para la próxima vez. Luego se crea un MP4 nuevo con el texto sincronizado
+  estampado en la imagen (se ve en cualquier reproductor, celular o red social).
+  El video original no se modifica.
+
+CONSEJOS
+- Modelo: "small" es el equilibrio recomendado en español. Si en vivo va atrasado,
+  usa "base"; si quieres máxima precisión en archivos, "large-v3-turbo" (más lento sin GPU).
+- Todo se procesa en tu computador; el audio no se envía a ningún servicio.
+- Las transcripciones se guardan automáticamente en Documentos\Transcriptor (TXT)
+  y puedes exportar a Word, SRT o VTT.
+- Si un enlace de YouTube deja de funcionar, ejecuta actualizar.bat.
+- Transcribir una reunión: avisa a los participantes, como harías al grabarla.
