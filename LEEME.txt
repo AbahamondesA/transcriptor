@@ -8,11 +8,14 @@ INSTALACIÓN (una sola vez)
    La primera vez que transcribas se descarga el modelo elegido (small ≈ 500 MB).
 
 LAS TRES FORMAS DE USO
-1 · Archivo: videos o audios de cualquier carpeta o unidad (escritorio, USB, red).
-    - Botón Examinar (puedes elegir varios a la vez: quedan en cola).
-    - Arrastra archivos o carpetas completas a la ventana.
-    - Clic derecho en cualquier video > Enviar a > Transcriptor.
-    El texto va apareciendo mientras se procesa; cada uno se guarda en TXT y SRT.
+1 · Archivos (cola automática): agrega varios archivos, una carpeta completa o varios
+    enlaces, y presiona "Procesar cola". Al terminar uno, sigue solo con el siguiente.
+    - La lista muestra el estado de cada uno (pendiente, transcribiendo %, listo, error).
+    - Si uno falla, lo marca y continúa con el resto.
+    - Puedes agregar más mientras avanza, reordenar (▲ ▼) o quitar.
+    - Por cada archivo guarda TXT y SRT y, si lo marcas: Word, traducción y video con
+      subtítulos (con tu formato guardado), en la carpeta que elijas.
+    - También: arrastrar archivos o carpetas a la ventana, o clic derecho > Enviar a.
 2 · Enlace: pega un enlace de YouTube, Vimeo, Facebook, etc. Se descarga y se transcribe.
     Al terminar, "Ver video con transcripción sincronizada" abre el video con el texto
     al lado: la frase actual se resalta, puedes hacer clic en una línea para saltar a ese

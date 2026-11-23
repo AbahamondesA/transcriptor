@@ -206,6 +206,20 @@ def a_visor(segs, media, ruta_html, titulo):
         f.write(pagina)
 
 
+def segs_segun(segs, vista):
+    """Original, Traducción o Ambos (texto y traducción en dos líneas)."""
+    out = []
+    for s in segs:
+        tr = s.get("trad")
+        if vista == "Traducción" and tr:
+            out.append(dict(s, text=tr))
+        elif vista == "Ambos" and tr:
+            out.append(dict(s, text=s["text"] + "\n" + tr))
+        else:
+            out.append(s)
+    return out
+
+
 # ───────────────────────── lectura de audio ─────────────────────────
 def decodificar(ruta):
     """Extrae el audio de cualquier archivo como mono 16 kHz float32.
@@ -590,10 +604,12 @@ class App:
         except Exception:
             log.info("Arrastrar y soltar no disponible (falta tkinterdnd2)")
         # archivos recibidos desde "Enviar a" o "Abrir con"
-        args = [a for a in sys.argv[1:] if os.path.isfile(a)]
+        args = [a for a in sys.argv[1:] if os.path.isfile(a) or os.path.isdir(a)]
         if args:
-            self._poner_archivos(args)
-            root.after(500, self._transcribir_archivo)
+            rutas = []
+            for a in args:
+                rutas += self._medios_de_carpeta(a) if os.path.isdir(a) else [a]
+            root.after(500, lambda: self._poner_archivos(rutas, iniciar=True))
 
     # ---------- interfaz ----------
     def _estilo(self):
@@ -622,16 +638,58 @@ class App:
         nb.pack(fill="x", padx=10)
         self.nb = nb
 
-        # 1) Archivo
+        # 1) Archivos en cola
         f1 = ttk.Frame(nb, padding=10)
-        nb.add(f1, text="  1 · Archivo de audio o video  ")
-        self.ruta = tk.StringVar()
-        ttk.Entry(f1, textvariable=self.ruta).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(f1, text="Examinar…", command=self._examinar).grid(row=0, column=1)
-        ttk.Button(f1, text="Transcribir", style="Acc.TButton", command=self._transcribir_archivo).grid(row=0, column=2, padx=6)
-        ttk.Label(f1, text="Desde cualquier carpeta o unidad (también USB o red). Puedes elegir varios, "
-                           "o arrastrar archivos o carpetas a esta ventana.",
-                  foreground="#666").grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        nb.add(f1, text="  1 · Archivos (cola automática)  ")
+        bar1 = ttk.Frame(f1)
+        bar1.grid(row=0, column=0, columnspan=2, sticky="ew")
+        for texto, cmd in (("Agregar archivos…", self._examinar), ("Agregar carpeta…", self._agregar_carpeta),
+                           ("Agregar enlaces…", self._agregar_enlaces), ("Quitar", self._quitar_cola),
+                           ("Vaciar", self._vaciar_cola), ("▲", lambda: self._mover_cola(-1)),
+                           ("▼", lambda: self._mover_cola(1))):
+            ttk.Button(bar1, text=texto, command=cmd, width=3 if len(texto) == 1 else None).pack(side="left", padx=(0, 4))
+        self.btn_cola = ttk.Button(bar1, text="▶ Procesar cola", style="Acc.TButton", command=self._procesar_cola)
+        self.btn_cola.pack(side="right")
+        self.arbol = ttk.Treeview(f1, columns=("n", "nombre", "estado"), show="headings", height=5,
+                                  selectmode="extended")
+        for col, tit, ancho, est in (("n", "#", 36, False), ("nombre", "Archivo o enlace", 520, True),
+                                     ("estado", "Estado", 230, False)):
+            self.arbol.heading(col, text=tit, anchor="w")
+            self.arbol.column(col, width=ancho, stretch=est, anchor="w")
+        self.arbol.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        sb = ttk.Scrollbar(f1, orient="vertical", command=self.arbol.yview)
+        sb.grid(row=1, column=1, sticky="ns", pady=(6, 0))
+        self.arbol.configure(yscrollcommand=sb.set)
+        self.arbol.bind("<Delete>", lambda e: self._quitar_cola())
+        opc = ttk.Frame(f1)
+        opc.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(opc, text="Al terminar cada uno:").grid(row=0, column=0, sticky="w")
+        self.op_word = tk.BooleanVar(value=False)
+        self.op_trad = tk.BooleanVar(value=False)
+        self.op_dir = tk.StringVar(value="Detectar automáticamente")
+        self.op_video = tk.BooleanVar(value=False)
+        self.op_subs = tk.StringVar(value="Original")
+        ttk.Label(opc, text="guarda TXT y SRT siempre", foreground="#666").grid(row=0, column=1, sticky="w", padx=8)
+        ttk.Checkbutton(opc, text="Guardar también en Word", variable=self.op_word).grid(row=0, column=2, sticky="w", padx=8)
+        ttk.Checkbutton(opc, text="Traducir:", variable=self.op_trad).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Combobox(opc, textvariable=self.op_dir, values=list(DIRECCIONES), width=24,
+                     state="readonly").grid(row=1, column=1, sticky="w", padx=8, pady=(4, 0))
+        fv = ttk.Frame(opc)
+        fv.grid(row=1, column=2, columnspan=2, sticky="w", padx=8, pady=(4, 0))
+        ttk.Checkbutton(fv, text="Crear video con subtítulos en:", variable=self.op_video).pack(side="left")
+        ttk.Combobox(fv, textvariable=self.op_subs, values=["Original", "Traducción", "Ambos"], width=11,
+                     state="readonly").pack(side="left", padx=4)
+        ttk.Label(fv, text="(usa tu formato de subtítulos guardado)", foreground="#666").pack(side="left")
+        fd = ttk.Frame(opc)
+        fd.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Label(fd, text="Guardar resultados en:").pack(side="left")
+        self.op_destino = tk.StringVar(value=OUT_DIR)
+        ttk.Label(fd, textvariable=self.op_destino, foreground="#1d4f91").pack(side="left", padx=6)
+        ttk.Button(fd, text="Cambiar…", command=self._cambiar_destino).pack(side="left")
+        ttk.Button(fd, text="Abrir carpeta", command=lambda: self._abrir_carpeta(self.op_destino.get())).pack(side="left", padx=4)
+        ttk.Label(f1, text="Puedes agregar más archivos mientras la cola avanza; si uno falla, sigue con el siguiente. "
+                           "También puedes arrastrar archivos o carpetas a la ventana.",
+                  foreground="#666").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         f1.columnconfigure(0, weight=1)
 
         # 2) Enlace
@@ -783,6 +841,30 @@ class App:
                     self._pintar_parcial()
                 elif tipo == "progreso":
                     self.prog["value"] = m[1]
+                elif tipo == "cola_item":
+                    if self.arbol.exists(m[1]):
+                        v = list(self.arbol.item(m[1], "values"))
+                        v[2] = m[2]
+                        self.arbol.item(m[1], values=v)
+                        if m[2].startswith("En curso"):
+                            self.arbol.see(m[1])
+                elif tipo == "cola_nuevo":
+                    self._limpiar(forzar=True)
+                    self.titulo = os.path.splitext(m[1])[0]
+                    self.root.title(f"{APP} — {m[1]}" + (f" (quedan {m[2]} en cola)" if m[2] > 0 else ""))
+                elif tipo == "cola_traducido":
+                    if self.vista.get() == "Original":
+                        self.vista.set("Ambos")
+                    self._repintar()
+                elif tipo == "cola_media":
+                    self.media, self.titulo = m[1], m[2]
+                    self.btn_visor.config(state="normal")
+                    try:
+                        self.btn_exportar.config(state="normal" if info_media(self.media)[0] else "disabled")
+                    except Exception:
+                        pass
+                elif tipo == "cola_fin":
+                    self._cola_fin(*m[1:])
                 elif tipo == "lineas_trad":
                     self._lineas_traducidas(*m[1:])
                 elif tipo == "traducido":
@@ -1118,8 +1200,8 @@ class App:
         if si:
             self.prog["value"] = 0
 
-    def _limpiar(self):
-        if self.ocupado:
+    def _limpiar(self, forzar=False):
+        if self.ocupado and not forzar:
             return
         self.segs.clear()
         self.parciales.clear()
@@ -1140,46 +1222,293 @@ class App:
         if ps:
             self._poner_archivos(list(ps))
 
-    def _poner_archivos(self, rutas):
+    def _agregar_carpeta(self):
+        c = filedialog.askdirectory(title="Elige una carpeta: se agregan todos sus audios y videos",
+                                    initialdir=self._ultima_carpeta)
+        if c:
+            self._poner_archivos(self._medios_de_carpeta(c))
+
+    @staticmethod
+    def _medios_de_carpeta(c):
+        rutas = []
+        for raiz, _, fs in os.walk(c):
+            rutas += [os.path.join(raiz, f) for f in sorted(fs) if os.path.splitext(f)[1].lower() in EXT_MEDIA]
+        return rutas
+
+    def _agregar_enlaces(self):
+        d = tk.Toplevel(self.root)
+        d.title("Agregar enlaces a la cola")
+        d.transient(self.root)
+        f = ttk.Frame(d, padding=12)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="Pega uno o varios enlaces (YouTube u otros), uno por línea:").pack(anchor="w")
+        t = tk.Text(f, width=80, height=10, font=("Segoe UI", 10))
+        t.pack(fill="both", expand=True, pady=6)
+        try:
+            clip = self.root.clipboard_get()
+            if re.match(r"https?://", clip.strip()):
+                t.insert("1.0", clip.strip() + "\n")
+        except tk.TclError:
+            pass
+
+        def ok():
+            urls = re.findall(r"https?://\S+", t.get("1.0", "end"))
+            d.destroy()
+            self._poner_en_cola([{"url": u} for u in urls])
+        ttk.Button(f, text="Agregar a la cola", style="Acc.TButton", command=ok).pack(anchor="e")
+        t.focus_set()
+        d.grab_set()
+
+    def _poner_archivos(self, rutas, iniciar=False):
         rutas = [r for r in rutas if os.path.isfile(r)]
         if not rutas:
             return
         self._ultima_carpeta = os.path.dirname(rutas[0])
-        self.ruta.set(" | ".join(rutas) if len(rutas) > 1 else rutas[0])
+        self._poner_en_cola([{"ruta": r} for r in rutas], iniciar)
+
+    def _poner_en_cola(self, items, iniciar=False):
+        existentes = {it.get("ruta") or it.get("url") for it in self.cola if it["estado"] == "Pendiente"}
+        n = 0
+        for it in items:
+            clave = it.get("ruta") or it.get("url")
+            if clave in existentes:
+                continue
+            existentes.add(clave)
+            it["estado"] = "Pendiente"
+            it["nombre"] = os.path.basename(it["ruta"]) if it.get("ruta") else it["url"]
+            it["iid"] = self.arbol.insert("", "end", values=("", it["nombre"], "Pendiente"))
+            self.cola.append(it)
+            n += 1
+        self._numerar()
         self.nb.select(0)
+        if n:
+            self.estado.config(text=f"{n} elemento(s) agregados a la cola.")
+        if iniciar and not self.ocupado:
+            self._procesar_cola()
+
+    def _numerar(self):
+        for i, iid in enumerate(self.arbol.get_children(), 1):
+            v = list(self.arbol.item(iid, "values"))
+            v[0] = i
+            self.arbol.item(iid, values=v)
+
+    def _item_de(self, iid):
+        return next((it for it in self.cola if it["iid"] == iid), None)
+
+    def _quitar_cola(self):
+        for iid in self.arbol.selection():
+            it = self._item_de(iid)
+            if it and it["estado"].startswith("En curso"):
+                continue
+            if it:
+                self.cola.remove(it)
+            self.arbol.delete(iid)
+        self._numerar()
+
+    def _vaciar_cola(self):
+        for it in list(self.cola):
+            if not it["estado"].startswith("En curso"):
+                self.cola.remove(it)
+                self.arbol.delete(it["iid"])
+        self._numerar()
+
+    def _mover_cola(self, paso):
+        sel = self.arbol.selection()
+        if not sel:
+            return
+        hijos = list(self.arbol.get_children())
+        for iid in (sel if paso < 0 else reversed(sel)):
+            i = hijos.index(iid)
+            j = max(0, min(len(hijos) - 1, i + paso))
+            self.arbol.move(iid, "", j)
+            hijos = list(self.arbol.get_children())
+        orden = {iid: k for k, iid in enumerate(hijos)}
+        self.cola.sort(key=lambda it: orden.get(it["iid"], 1e9))
+        self._numerar()
+
+    def _cambiar_destino(self):
+        c = filedialog.askdirectory(title="Carpeta donde guardar los resultados", initialdir=self.op_destino.get())
+        if c:
+            self.op_destino.set(os.path.normpath(c))
+
+    def _abrir_carpeta(self, c):
+        try:
+            os.makedirs(c, exist_ok=True)
+            os.startfile(c)
+        except AttributeError:
+            webbrowser.open("file://" + c)
+        except Exception as e:
+            messagebox.showerror(APP, str(e))
 
     def _soltar(self, evento):
         rutas = []
         for r in self.root.tk.splitlist(evento.data):
-            if os.path.isdir(r):      # carpeta: toma todos sus audios/videos
-                for raiz, _, fs in os.walk(r):
-                    rutas += [os.path.join(raiz, f) for f in sorted(fs)
-                              if os.path.splitext(f)[1].lower() in EXT_MEDIA]
-            else:
-                rutas.append(r)
-        self._poner_archivos(rutas)
-        if rutas and not self.ocupado:
-            self._transcribir_archivo()
+            rutas += self._medios_de_carpeta(r) if os.path.isdir(r) else [r]
+        self._poner_archivos(rutas, iniciar=True)
 
-    # ---------- 1) archivo ----------
-    def _transcribir_archivo(self):
+    # ---------- 1) cola automática ----------
+    def _procesar_cola(self):
         if self.ocupado:
             return
-        rutas = [r.strip().strip('"') for r in self.ruta.get().split(" | ") if r.strip()]
-        rutas = [r for r in rutas if os.path.isfile(r)]
-        if not rutas:
-            messagebox.showwarning(APP, "Elige un archivo válido (botón Examinar, o arrástralo a la ventana).")
+        for it in self.cola:          # lo detenido antes vuelve a quedar pendiente
+            if it["estado"] == "Detenido" or it["estado"].startswith("En curso"):
+                it["estado"] = "Pendiente"
+                v = list(self.arbol.item(it["iid"], "values"))
+                v[2] = "Pendiente"
+                self.arbol.item(it["iid"], values=v)
+        if not any(it["estado"] == "Pendiente" for it in self.cola):
+            messagebox.showinfo(APP, "La cola está vacía. Agrega archivos, una carpeta o enlaces.")
             return
-        self.cola = rutas[1:]
-        self._iniciar_archivo(rutas[0])
-
-    def _iniciar_archivo(self, ruta):
-        self._limpiar()
+        op = {"word": self.op_word.get(), "trad": self.op_trad.get(), "dir": DIRECCIONES[self.op_dir.get()],
+              "video": self.op_video.get(), "subs": self.op_subs.get(), "destino": self.op_destino.get(),
+              "modelo": self.modelo.get(), "idioma": self._idioma(), "con_video": self.con_video.get()}
         self._ocupar(True)
         self.stop_evt.clear()
-        pend = f" (quedan {len(self.cola)} en cola)" if self.cola else ""
-        self.root.title(f"{APP} — {os.path.basename(ruta)}{pend}")
-        threading.Thread(target=self._job_archivo, args=(ruta,), daemon=True).start()
+        self.btn_cola.config(state="disabled")
+        threading.Thread(target=self._job_cola, args=(op,), daemon=True).start()
+
+    def _job_cola(self, op):
+        hechos, fallos = 0, 0
+        os.makedirs(op["destino"], exist_ok=True)
+        try:
+            self.motor.cargar(op["modelo"], self._log)
+        except Exception as e:
+            log.exception("modelo")
+            self.emit(("cola_fin", 0, 0, f"No se pudo cargar el modelo: {e}"))
+            return
+        while not self.stop_evt.is_set():
+            it = next((x for x in self.cola if x["estado"] == "Pendiente"), None)
+            if it is None:
+                break
+            pend = sum(1 for x in self.cola if x["estado"] == "Pendiente") - 1
+            self._estado_item(it, "En curso…")
+            self.emit(("cola_nuevo", it["nombre"], pend))
+            try:
+                if it.get("url"):
+                    self._estado_item(it, "En curso: descargando…")
+                    ruta, titulo = self._descargar(it["url"], op["con_video"])
+                else:
+                    ruta, titulo = it["ruta"], os.path.splitext(it["nombre"])[0]
+                self._estado_item(it, "En curso: transcribiendo…")
+                segs = self._transcribir_lista(ruta, op["idioma"], lambda pct: self._estado_item(
+                    it, f"En curso: transcribiendo {pct:.0f}%"))
+                if self.stop_evt.is_set():
+                    self._estado_item(it, "Detenido")
+                    break
+                if not segs:
+                    raise RuntimeError("No se detectó voz en el archivo.")
+                if op["trad"]:
+                    self._estado_item(it, "En curso: traduciendo…")
+                    for i in range(0, len(segs), 24):
+                        lote = segs[i:i + 24]
+                        for sg, tr in zip(lote, self.traductor.traducir_lista([x["text"] for x in lote], op["dir"], self._log)):
+                            sg["trad"] = tr
+                    self.emit(("cola_traducido",))
+                self._estado_item(it, "En curso: guardando…")
+                base = os.path.join(op["destino"], re.sub(r'[\\/:*?"<>|]+', "_", titulo)[:90])
+                vista_txt = "Ambos" if op["trad"] else "Original"
+                with open(base + ".txt", "w", encoding="utf-8") as f:
+                    f.write(a_txt(segs_segun(segs, vista_txt), titulo))
+                with open(base + ".srt", "w", encoding="utf-8") as f:
+                    f.write(a_srt(segs))
+                if op["trad"]:
+                    with open(base + " - traducción.srt", "w", encoding="utf-8") as f:
+                        f.write(a_srt(segs_segun(segs, "Traducción")))
+                if op["word"]:
+                    a_docx(segs_segun(segs, vista_txt), base + ".docx", titulo)
+                extra = ""
+                if op["video"]:
+                    if info_media(ruta)[0]:
+                        self._estado_item(it, "En curso: creando video…")
+                        ok = video_subtitulado(ruta, segs_segun(segs, op["subs"]), base + " - subtitulado.mp4",
+                                               cargar_estilo(), lambda pct, t, d: self._estado_item(
+                                                   it, f"En curso: creando video {pct:.0f}%"), self.stop_evt)
+                        if not ok:
+                            self._estado_item(it, "Detenido")
+                            break
+                        extra = " + video"
+                    else:
+                        extra = " (sin video: es solo audio)"
+                self.emit(("cola_media", ruta, titulo))
+                self._estado_item(it, "Listo ✓" + extra)
+                hechos += 1
+            except Exception as e:
+                log.exception("cola: " + it["nombre"])
+                self._estado_item(it, "Error: " + str(e).splitlines()[0][:120] if str(e) else "Error")
+                fallos += 1
+        self.emit(("cola_fin", hechos, fallos, op["destino"]))
+
+    def _estado_item(self, it, estado):
+        it["estado"] = estado
+        self.emit(("cola_item", it["iid"], estado))
+
+    def _transcribir_lista(self, ruta, idioma, al_avanzar):
+        segs_w, info = self.motor.archivo(ruta, idioma)
+        dur = max(info.duration or 1, 1)
+        out, ult = [], -5
+        for s in segs_w:
+            if self.stop_evt.is_set():
+                break
+            texto = s.text.strip()
+            if texto and not es_alucinacion(texto):
+                sg = {"start": s.start, "end": s.end, "text": texto, "src": "", "wall": None}
+                out.append(sg)
+                self.emit(("seg", sg))
+            pct = min(100, s.end / dur * 100)
+            self.emit(("progreso", pct))
+            if pct - ult >= 1:
+                ult = pct
+                al_avanzar(pct)
+        return out
+
+    def _descargar(self, url, con_video):
+        import yt_dlp
+        destino = os.path.join(OUT_DIR, "descargas")
+        os.makedirs(destino, exist_ok=True)
+
+        def hook(d):
+            if self.stop_evt.is_set():
+                raise yt_dlp.utils.DownloadCancelled("Cancelado")
+            if d.get("status") == "downloading":
+                tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                if tot:
+                    self.emit(("progreso", d.get("downloaded_bytes", 0) / tot * 100))
+                self._log(f"Descargando… {d.get('_percent_str', '').strip()}")
+
+        fmt = ("18/best[ext=mp4][vcodec!=none][acodec!=none]/best[acodec!=none][vcodec!=none]/best"
+               if con_video else "bestaudio[ext=m4a]/bestaudio/best")
+        opts = {"format": fmt, "noplaylist": True, "quiet": True, "no_warnings": True,
+                "outtmpl": os.path.join(destino, "%(title).80s [%(id)s].%(ext)s"),
+                "windowsfilenames": True, "progress_hooks": [hook]}
+        self._log("Obteniendo información del enlace…")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            ruta = ydl.prepare_filename(info)
+        if not os.path.exists(ruta):
+            base = os.path.splitext(ruta)[0]
+            cand = [os.path.join(destino, f) for f in os.listdir(destino)
+                    if os.path.join(destino, f).startswith(base)]
+            ruta = cand[0] if cand else ruta
+        return ruta, info.get("title") or os.path.splitext(os.path.basename(ruta))[0]
+
+    def _cola_fin(self, hechos, fallos, destino_o_error):
+        self._ocupar(False)
+        self.btn_cola.config(state="normal")
+        self.root.title(f"{APP} — archivos, enlaces y reuniones en vivo")
+        if hechos == 0 and fallos == 0 and not os.path.isdir(str(destino_o_error)):
+            messagebox.showerror(APP, destino_o_error)
+            return
+        det = " (detenida)" if self.stop_evt.is_set() else ""
+        self.estado.config(text=f"Cola terminada{det}: {hechos} listo(s), {fallos} con error.")
+        self.prog["value"] = 100
+        try:
+            self.root.bell()
+        except tk.TclError:
+            pass
+        msg = f"Cola terminada{det}.\n\n{hechos} archivo(s) listo(s)" + (f", {fallos} con error" if fallos else "") + \
+              f".\nResultados en:\n{destino_o_error}\n\n¿Abrir la carpeta?"
+        if messagebox.askyesno(APP, msg):
+            self._abrir_carpeta(destino_o_error)
 
     def _job_archivo(self, ruta, titulo=None):
         try:
@@ -1215,44 +1544,14 @@ class App:
 
     def _job_url(self, url, con_video):
         try:
-            import yt_dlp
-        except ImportError:
-            self.emit(("error", "Falta yt-dlp. Ejecuta instalar.bat de nuevo."))
-            return
-        destino = os.path.join(OUT_DIR, "descargas")
-        os.makedirs(destino, exist_ok=True)
-
-        def hook(d):
-            if self.stop_evt.is_set():
-                raise yt_dlp.utils.DownloadCancelled("Cancelado")
-            if d.get("status") == "downloading":
-                tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                if tot:
-                    self.emit(("progreso", d.get("downloaded_bytes", 0) / tot * 100))
-                self._log(f"Descargando… {d.get('_percent_str', '').strip()}")
-
-        fmt = ("18/best[ext=mp4][vcodec!=none][acodec!=none]/best[acodec!=none][vcodec!=none]/best"
-               if con_video else "bestaudio[ext=m4a]/bestaudio/best")
-        opts = {"format": fmt, "noplaylist": True, "quiet": True, "no_warnings": True,
-                "outtmpl": os.path.join(destino, "%(title).80s [%(id)s].%(ext)s"),
-                "windowsfilenames": True, "progress_hooks": [hook]}
-        try:
-            self._log("Obteniendo información del enlace…")
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                ruta = ydl.prepare_filename(info)
-            if not os.path.exists(ruta):
-                base = os.path.splitext(ruta)[0]
-                cand = [os.path.join(destino, f) for f in os.listdir(destino)
-                        if os.path.join(destino, f).startswith(base)]
-                ruta = cand[0] if cand else ruta
+            ruta, titulo = self._descargar(url, con_video)
         except Exception as e:
             log.exception("enlace")
             self.emit(("error", f"No se pudo descargar el enlace:\n{e}\n\n"
                                 "Si es YouTube, ejecuta actualizar.bat (YouTube cambia seguido)."))
             return
         self.emit(("progreso", 0))
-        self._job_archivo(ruta, info.get("title"))
+        self._job_archivo(ruta, titulo)
 
     # ---------- 3) en vivo ----------
     def _cargar_dispositivos(self, silencioso=False):
@@ -1354,12 +1653,6 @@ class App:
             self.estado.config(text=f"Listo · {len(self.segs)} segmentos." +
                                (" (detenido)" if self.stop_evt.is_set() else ""))
             self._autoguardar(srt=True)
-            if self.stop_evt.is_set():
-                self.cola = []
-            if self.cola:
-                self._iniciar_archivo(self.cola.pop(0))
-            else:
-                self.root.title(f"{APP} — archivos, enlaces y reuniones en vivo")
         else:
             self.estado.config(text="Listo.")
 
