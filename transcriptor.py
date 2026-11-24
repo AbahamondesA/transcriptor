@@ -954,10 +954,36 @@ class App:
         # progreso
         pf = ttk.Frame(r, padding=(10, 6, 10, 0))
         pf.pack(fill="x")
-        self.prog = ttk.Progressbar(pf, mode="determinate", maximum=100)
+        fila = ttk.Frame(pf)
+        fila.pack(fill="x")
+        self.lbl_etapa = ttk.Label(fila, text="Sin tareas en curso.", foreground="#333")
+        self.lbl_etapa.pack(side="left")
+        self.lbl_pct = ttk.Label(fila, text="", font=("Segoe UI", 11, "bold"), foreground="#1d4f91")
+        self.lbl_pct.pack(side="right")
+        self.lbl_eta = ttk.Label(fila, text="", foreground="#666")
+        self.lbl_eta.pack(side="right", padx=10)
+        fb = ttk.Frame(pf)
+        fb.pack(fill="x", pady=(2, 0))
+        self.prog = ttk.Progressbar(fb, mode="determinate", maximum=100)
         self.prog.pack(side="left", fill="x", expand=True)
-        self.btn_det = ttk.Button(pf, text="Detener", command=self._detener, state="disabled")
+        self.btn_det = ttk.Button(fb, text="Detener", command=self._detener, state="disabled")
         self.btn_det.pack(side="left", padx=(8, 0))
+        # barra general de la cola (solo visible mientras corre una cola)
+        self.panel_cola = ttk.Frame(pf)
+        fc = ttk.Frame(self.panel_cola)
+        fc.pack(fill="x", pady=(6, 0))
+        self.lbl_cola = ttk.Label(fc, text="", foreground="#333")
+        self.lbl_cola.pack(side="left")
+        self.lbl_cola_pct = ttk.Label(fc, text="", font=("Segoe UI", 11, "bold"), foreground="#1b7a4b")
+        self.lbl_cola_pct.pack(side="right")
+        self.lbl_cola_eta = ttk.Label(fc, text="", foreground="#666")
+        self.lbl_cola_eta.pack(side="right", padx=10)
+        self.prog_cola = ttk.Progressbar(self.panel_cola, mode="determinate", maximum=100)
+        self.prog_cola.pack(fill="x", pady=(2, 0))
+        self._t_etapa = None
+        self._t_cola = None
+        self.cola_ctx = None
+        self._t_vivo = None
 
         # transcripción
         tf = ttk.Frame(r, padding=(10, 6))
@@ -1070,7 +1096,16 @@ class App:
                         self.parciales.pop(m[1], None)
                     self._pintar_parcial()
                 elif tipo == "progreso":
-                    self.prog["value"] = m[1]
+                    self._set_progreso(m[1])
+                elif tipo == "etapa":
+                    self._set_etapa(m[1], m[2] if len(m) > 2 else False)
+                elif tipo == "cola_fase":
+                    k, n, a, b, texto = m[1:]
+                    if not self.panel_cola.winfo_ismapped():
+                        self.panel_cola.pack(fill="x")
+                    self.cola_ctx = (k, n, a, b)
+                    self._set_etapa(texto)
+                    self._set_progreso(0)
                 elif tipo == "cola_item":
                     if self.arbol.exists(m[1]):
                         v = list(self.arbol.item(m[1], "values"))
@@ -1095,6 +1130,10 @@ class App:
                         pass
                 elif tipo == "tp_listo":
                     self._tp_listo(*m[1:])
+                elif tipo == "cola_inicio":
+                    self._t_cola = time.time()
+                    self.prog_cola["value"] = 0
+                    self.lbl_cola_eta.config(text="")
                 elif tipo == "cola_fin":
                     self._cola_fin(*m[1:])
                 elif tipo == "lineas_trad":
@@ -1118,6 +1157,8 @@ class App:
                         self._fin(None)
         except queue.Empty:
             pass
+        if self.captura and self._t_vivo:
+            self.lbl_eta.config(text="en vivo " + ts_corto(time.time() - self._t_vivo))
         self.root.after(100, self._bucle)
 
     def _pintar(self, s, i=None, mover=True):
@@ -1349,6 +1390,8 @@ class App:
                         if self.stop_evt.is_set():
                             break
                         lote = segs[i:i + 24]
+                        if i == 0:
+                            self.emit(("etapa", "Traduciendo la transcripción…"))
                         trads = self.traductor.traducir_lista([s["text"] for s in lote], direccion, self._log)
                         for s, t in zip(lote, trads):
                             s["trad"] = t
@@ -1371,7 +1414,7 @@ class App:
         if self.vista.get() == "Original":
             self.vista.set("Ambos")
         self._repintar()
-        self.prog["value"] = 100
+        self._set_progreso(100)
         self.estado.config(text="Traducción lista. Elige «Original», «Traducción» o «Ambos» para ver y exportar.")
         self._autoguardar()
 
@@ -1430,7 +1473,63 @@ class App:
         self.ocupado = si
         self.btn_det.config(state="normal" if si else "disabled")
         if si:
-            self.prog["value"] = 0
+            self._set_progreso(0)
+            self.lbl_eta.config(text="")
+        else:
+            if str(self.prog.cget("mode")) == "indeterminate":
+                self.prog.stop()
+                self.prog.config(mode="determinate")
+            self.lbl_eta.config(text="")
+            if self.lbl_etapa.cget("text").endswith("…"):
+                self.lbl_etapa.config(text=self.lbl_etapa.cget("text").rstrip("…") + " — terminado.")
+
+    @staticmethod
+    def _fmt_resta(seg):
+        seg = max(0, int(seg))
+        if seg < 60:
+            return f"quedan ~{max(seg, 1)} s"
+        if seg < 3600:
+            return f"quedan ~{round(seg / 60)} min"
+        return f"quedan ~{seg // 3600} h {round((seg % 3600) / 60)} min"
+
+    def _set_etapa(self, texto, indeterminado=False):
+        self.lbl_etapa.config(text=texto)
+        self._t_etapa = time.time()
+        self.lbl_eta.config(text="")
+        if indeterminado:
+            self.prog.config(mode="indeterminate")
+            self.prog.start(12)
+            self.lbl_pct.config(text="")
+        else:
+            if str(self.prog.cget("mode")) == "indeterminate":
+                self.prog.stop()
+                self.prog.config(mode="determinate")
+            self._set_progreso(0)
+
+    def _set_progreso(self, pct):
+        pct = max(0.0, min(100.0, float(pct)))
+        if str(self.prog.cget("mode")) == "indeterminate":
+            self.prog.stop()
+            self.prog.config(mode="determinate")
+        self.prog["value"] = pct
+        self.lbl_pct.config(text=f"{pct:.0f}%")
+        if self._t_etapa and 2 <= pct < 100:
+            pasado = time.time() - self._t_etapa
+            if pasado > 3:
+                self.lbl_eta.config(text=self._fmt_resta(pasado * (100 - pct) / pct))
+        elif pct >= 100:
+            self.lbl_eta.config(text="")
+        if self.cola_ctx:
+            k, n, a, b = self.cola_ctx
+            total = (k - 1 + a + (b - a) * pct / 100) / max(1, n) * 100
+            total = max(total, float(self.prog_cola["value"]))   # nunca retrocede
+            self.prog_cola["value"] = total
+            self.lbl_cola.config(text=f"Cola: archivo {k} de {n}")
+            self.lbl_cola_pct.config(text=f"{total:.0f}%")
+            if self._t_cola and 1 <= total < 100:
+                pasado = time.time() - self._t_cola
+                if pasado > 5:
+                    self.lbl_cola_eta.config(text=self._fmt_resta(pasado * (100 - total) / total) + " en total")
 
     def _limpiar(self, forzar=False):
         if self.ocupado and not forzar:
@@ -1444,7 +1543,7 @@ class App:
         self.txt.delete("1.0", "end")
         self.txt.configure(state="disabled")
         self.lbl_parcial.config(text="")
-        self.prog["value"] = 0
+        self._set_progreso(0)
 
     def _examinar(self):
         ps = filedialog.askopenfilenames(
@@ -1628,7 +1727,9 @@ class App:
                     nota = f"Se usaron los tiempos del archivo de subtítulos ({len(segs)} subtítulos)."
                 else:
                     trozos = dividir_en_subtitulos(texto, largo)
+                    self.emit(("etapa", "Cargando el modelo de voz…", True))
                     self.motor.cargar(modelo, self._log)
+                    self.emit(("etapa", "Sincronizando el texto con la voz del video…"))
                     self._log("Escuchando el video para sincronizar el texto…")
 
                     def av(pct):
@@ -1663,7 +1764,7 @@ class App:
         self.segs = segs
         self.media, self.titulo = video, titulo
         self._repintar()
-        self.prog["value"] = 100
+        self._set_progreso(100)
         self.btn_visor.config(state="normal")
         try:
             tiene_video = info_media(video)[0]
@@ -1699,31 +1800,53 @@ class App:
         self._ocupar(True)
         self.stop_evt.clear()
         self.btn_cola.config(state="disabled")
+        self.prog_cola["value"] = 0
+        self.lbl_cola.config(text="Cola: preparando…")
+        self.lbl_cola_pct.config(text="0%")
+        if not self.panel_cola.winfo_ismapped():
+            self.panel_cola.pack(fill="x")
         threading.Thread(target=self._job_cola, args=(op,), daemon=True).start()
 
     def _job_cola(self, op):
         hechos, fallos = 0, 0
         os.makedirs(op["destino"], exist_ok=True)
         try:
+            self.emit(("etapa", "Cargando el modelo de voz…", True))
             self.motor.cargar(op["modelo"], self._log)
         except Exception as e:
             log.exception("modelo")
             self.emit(("cola_fin", 0, 0, f"No se pudo cargar el modelo: {e}"))
             return
+        self.emit(("cola_inicio",))
         while not self.stop_evt.is_set():
             it = next((x for x in self.cola if x["estado"] == "Pendiente"), None)
             if it is None:
                 break
             pend = sum(1 for x in self.cola if x["estado"] == "Pendiente") - 1
+            k = hechos + fallos + 1
+            n = k + pend
+            pesos = ([("descarga", 0.15)] if it.get("url") else []) + [("transcripcion", 0.6)] + \
+                    ([("traduccion", 0.1)] if op["trad"] else []) + ([("video", 0.35)] if op["video"] else []) + \
+                    [("guardar", 0.02)]
+            tot_p, acc, rango = sum(w for _, w in pesos), 0.0, {}
+            for nom, w in pesos:
+                rango[nom] = (acc / tot_p, (acc + w) / tot_p)
+                acc += w
+
+            def fase(nom, texto, k=k, n=n, rango=rango):
+                a, b = rango.get(nom, (1.0, 1.0))
+                self.emit(("cola_fase", k, n, a, b, texto))
             self._estado_item(it, "En curso…")
             self.emit(("cola_nuevo", it["nombre"], pend))
             try:
                 if it.get("url"):
                     self._estado_item(it, "En curso: descargando…")
+                    fase("descarga", f"Descargando: {it['nombre']}…")
                     ruta, titulo = self._descargar(it["url"], op["con_video"])
                 else:
                     ruta, titulo = it["ruta"], os.path.splitext(it["nombre"])[0]
                 self._estado_item(it, "En curso: transcribiendo…")
+                fase("transcripcion", f"Transcribiendo: {os.path.basename(ruta)}…")
                 segs = self._transcribir_lista(ruta, op["idioma"], lambda pct: self._estado_item(
                     it, f"En curso: transcribiendo {pct:.0f}%"))
                 if self.stop_evt.is_set():
@@ -1733,10 +1856,14 @@ class App:
                     raise RuntimeError("No se detectó voz en el archivo.")
                 if op["trad"]:
                     self._estado_item(it, "En curso: traduciendo…")
+                    fase("traduccion", f"Traduciendo: {os.path.basename(ruta)}…")
                     for i in range(0, len(segs), 24):
                         lote = segs[i:i + 24]
                         for sg, tr in zip(lote, self.traductor.traducir_lista([x["text"] for x in lote], op["dir"], self._log)):
                             sg["trad"] = tr
+                        pct_t = (i + len(lote)) / len(segs) * 100
+                        self.emit(("progreso", pct_t))
+                        self._estado_item(it, f"En curso: traduciendo {pct_t:.0f}%")
                     self.emit(("cola_traducido",))
                 self._estado_item(it, "En curso: guardando…")
                 base = os.path.join(op["destino"], re.sub(r'[\\/:*?"<>|]+', "_", titulo)[:90])
@@ -1754,9 +1881,13 @@ class App:
                 if op["video"]:
                     if info_media(ruta)[0]:
                         self._estado_item(it, "En curso: creando video…")
+                        fase("video", f"Creando video con subtítulos: {os.path.basename(ruta)}…")
+
+                        def prog_v(pct, t, d, it=it):
+                            self.emit(("progreso", pct))
+                            self._estado_item(it, f"En curso: creando video {pct:.0f}%")
                         ok = video_subtitulado(ruta, segs_segun(segs, op["subs"]), base + " - subtitulado.mp4",
-                                               cargar_estilo(), lambda pct, t, d: self._estado_item(
-                                                   it, f"En curso: creando video {pct:.0f}%"), self.stop_evt)
+                                               cargar_estilo(), prog_v, self.stop_evt)
                         if not ok:
                             self._estado_item(it, "Detenido")
                             break
@@ -1765,6 +1896,8 @@ class App:
                         extra = " (sin video: es solo audio)"
                 self.emit(("cola_media", ruta, titulo))
                 self._estado_item(it, "Listo ✓" + extra)
+                fase("guardar", f"Listo: {it['nombre']}")
+                self.emit(("progreso", 100))
                 hechos += 1
             except Exception as e:
                 log.exception("cola: " + it["nombre"])
@@ -1815,6 +1948,8 @@ class App:
                 "outtmpl": os.path.join(destino, "%(title).80s [%(id)s].%(ext)s"),
                 "windowsfilenames": True, "progress_hooks": [hook]}
         self._log("Obteniendo información del enlace…")
+        if not self.cola_ctx:
+            self.emit(("etapa", "Descargando el video del enlace…"))
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             ruta = ydl.prepare_filename(info)
@@ -1826,7 +1961,14 @@ class App:
         return ruta, info.get("title") or os.path.splitext(os.path.basename(ruta))[0]
 
     def _cola_fin(self, hechos, fallos, destino_o_error):
+        self.cola_ctx = None
+        self._t_cola = None
         self._ocupar(False)
+        if self.panel_cola.winfo_ismapped():
+            self.prog_cola["value"] = 100 if not self.stop_evt.is_set() else self.prog_cola["value"]
+            self.lbl_cola.config(text=f"Cola terminada: {hechos} listo(s)" + (f", {fallos} con error" if fallos else ""))
+            self.lbl_cola_pct.config(text=f"{self.prog_cola['value']:.0f}%")
+            self.lbl_cola_eta.config(text="")
         self.btn_cola.config(state="normal")
         self.root.title(f"{APP} — archivos, enlaces y reuniones en vivo")
         if hechos == 0 and fallos == 0 and not os.path.isdir(str(destino_o_error)):
@@ -1834,7 +1976,7 @@ class App:
             return
         det = " (detenida)" if self.stop_evt.is_set() else ""
         self.estado.config(text=f"Cola terminada{det}: {hechos} listo(s), {fallos} con error.")
-        self.prog["value"] = 100
+        self._set_progreso(100)
         try:
             self.root.bell()
         except tk.TclError:
@@ -1846,7 +1988,10 @@ class App:
 
     def _job_archivo(self, ruta, titulo=None):
         try:
+            if self.motor.nombre != self.modelo.get():
+                self.emit(("etapa", "Cargando el modelo de voz (la primera vez se descarga)…", True))
             self.motor.cargar(self.modelo.get(), self._log)
+            self.emit(("etapa", f"Transcribiendo: {os.path.basename(ruta)}…"))
             self._log("Transcribiendo… el texto aparece a medida que avanza.")
             segs, info = self.motor.archivo(ruta, self._idioma())
             dur = max(info.duration or 1, 1)
@@ -1935,8 +2080,7 @@ class App:
             return
         self._limpiar()
         self._ocupar(True)
-        self.prog.config(mode="indeterminate")
-        self.prog.start(15)
+        self._set_etapa("Preparando la transcripción en vivo…", True)
         self.btn_vivo.config(text="■ Detener transcripción en vivo")
 
         def arrancar():
@@ -1948,6 +2092,8 @@ class App:
                 return
             self.captura = Captura(self, canales, self.vista_previa.get(), self._idioma())
             self.captura.iniciar()
+            self.emit(("etapa", "● En vivo: escuchando y transcribiendo…", True))
+            self._t_vivo = time.time()
             self._log("● Escuchando… habla o reproduce el audio de la reunión/video.")
         threading.Thread(target=arrancar, daemon=True).start()
 
@@ -1964,8 +2110,11 @@ class App:
         if self.captura:
             self.captura.detener()
             self.captura = None
+            self._t_vivo = None
             self.prog.stop()
             self.prog.config(mode="determinate")
+            self.lbl_etapa.config(text="Sesión en vivo detenida.")
+            self.lbl_pct.config(text="")
             self.btn_vivo.config(text="● Iniciar transcripción en vivo")
             self.parciales.clear()
             self._pintar_parcial()
@@ -1978,7 +2127,7 @@ class App:
         self._ocupar(False)
         if datos:
             self.media, self.titulo = datos["media"], datos["titulo"]
-            self.prog["value"] = 100
+            self._set_progreso(100)
             self.btn_visor.config(state="normal")
             try:
                 self.btn_exportar.config(state="normal" if info_media(self.media)[0] else "disabled")
@@ -2523,6 +2672,7 @@ class App:
         def job():
             try:
                 self._log("Creando video con subtítulos…")
+                self.emit(("etapa", f"Creando video con subtítulos: {os.path.basename(salida)}…"))
                 ok_ = video_subtitulado(media, segs, salida, cfg, prog, self.stop_evt)
                 self.emit(("video_listo", salida if ok_ else None))
             except Exception as e:
@@ -2551,7 +2701,7 @@ class App:
         if not salida:
             self.estado.config(text="Creación de video cancelada.")
             return
-        self.prog["value"] = 100
+        self._set_progreso(100)
         self.estado.config(text=f"Video listo: {salida}")
         if messagebox.askyesno(APP, f"Video con subtítulos creado:\n{salida}\n\n¿Quieres reproducirlo ahora?"):
             try:

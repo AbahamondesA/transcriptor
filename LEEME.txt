@@ -73,6 +73,14 @@ VIDEO CON SUBTÍTULOS INTEGRADOS
   estampado en la imagen (se ve en cualquier reproductor, celular o red social).
   El video original no se modifica.
 
+BARRAS DE AVANCE
+- Barra de la tarea actual: muestra la etapa (cargando modelo, descargando, transcribiendo,
+  sincronizando, traduciendo, creando video), el porcentaje y el tiempo estimado restante.
+- Barra de la cola (aparece al procesar varios archivos): "archivo 2 de 5", porcentaje
+  total y tiempo restante estimado de toda la cola.
+- En vivo: indica que está escuchando y el tiempo transcurrido.
+- Cada archivo de la cola muestra además su propio estado y porcentaje en la lista.
+
 CONSEJOS
 - Modelo: "small" es el equilibrio recomendado en español. Si en vivo va atrasado,
   usa "base"; si quieres máxima precisión en archivos, "large-v3-turbo" (más lento sin GPU).
