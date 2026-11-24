@@ -48,6 +48,15 @@ VIDEO + TEXTO PROPIO (pestaña 5)
 - SRT/VTT: se usan sus tiempos tal cual.
 - Luego puedes revisar o traducir líneas (clic derecho) y crear el video con subtítulos.
 
+EDITAR TEXTO Y SUBTÍTULOS
+- Botón "Editar texto y subtítulos…" (sobre la transcripción): lista de todas las líneas
+  con inicio, fin, texto y traducción. Puedes:
+  - corregir el texto, la traducción y los tiempos de cada línea;
+  - unir líneas, dividir una línea donde está el cursor, insertar o eliminar;
+  - buscar y reemplazar en todo el texto;
+  - adelantar o atrasar todos los subtítulos a la vez (si van desfasados);
+  - abrir "Formato de subtítulos…" y "Guardar y crear video".
+
 VIDEO CON SUBTÍTULOS INTEGRADOS
 - Arriba de la ventana: "Subtitular el video al terminar". Si está marcado, cada video
   que transcribas (archivo, enlace, cola o video + texto propio) se entrega también como

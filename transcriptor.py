@@ -736,8 +736,8 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title(f"{APP} — archivos, enlaces y reuniones en vivo")
-        root.geometry("1000x720")
-        root.minsize(820, 560)
+        root.geometry("1120x820")
+        root.minsize(900, 620)
         self.motor = Motor()
         self.traductor = Traductor()
         self.q = queue.Queue()
@@ -965,7 +965,7 @@ class App:
         cab = ttk.Frame(tf)
         cab.pack(fill="x")
         ttk.Label(cab, text="Transcripción", style="Tit.TLabel").pack(side="left")
-        ttk.Label(cab, text="  clic derecho en una o varias líneas para traducirlas (Ctrl+T)",
+        ttk.Label(cab, text="  (clic derecho en una línea para traducirla)",
                   foreground="#777").pack(side="left")
         self.seguir = tk.BooleanVar(value=True)
         ttk.Checkbutton(cab, text="Desplazamiento automático", variable=self.seguir).pack(side="right")
@@ -975,7 +975,9 @@ class App:
         cbv.pack(side="right", padx=(4, 14))
         cbv.bind("<<ComboboxSelected>>", lambda e: self._repintar())
         ttk.Label(cab, text="Mostrar y exportar:").pack(side="right")
-        ttk.Button(cab, text="Traducir transcripción…", command=self._dialogo_traducir).pack(side="right", padx=14)
+        ttk.Button(cab, text="Traducir transcripción…", command=self._dialogo_traducir).pack(side="right", padx=(6, 14))
+        ttk.Button(cab, text="Editar texto y subtítulos…", style="Acc.TButton",
+                   command=self._editor).pack(side="right")
         self.txt = ScrolledText(tf, wrap="word", font=("Segoe UI", 11), padx=10, pady=8,
                                 relief="flat", borderwidth=1, background="#fbfbfc")
         self.txt.pack(fill="both", expand=True, pady=(4, 0))
@@ -996,17 +998,18 @@ class App:
 
         # acciones
         af = ttk.Frame(r, padding=(10, 0, 10, 10))
-        af.pack(fill="x")
+        af.pack(fill="x", side="bottom", before=tf)   # siempre visible aunque la ventana sea baja
         for texto, cmd in (("Copiar todo", self._copiar), ("Guardar TXT", lambda: self._guardar("txt")),
-                           ("SRT (subtítulos)", lambda: self._guardar("srt")), ("VTT", lambda: self._guardar("vtt")),
+                           ("SRT", lambda: self._guardar("srt")), ("VTT", lambda: self._guardar("vtt")),
                            ("Word", lambda: self._guardar("docx")), ("Limpiar", self._limpiar)):
             ttk.Button(af, text=texto, command=cmd).pack(side="left", padx=(0, 6))
-        self.btn_visor = ttk.Button(af, text="▶ Ver video con transcripción sincronizada",
+        self.btn_visor = ttk.Button(af, text="▶ Ver con video sincronizado",
                                     style="Acc.TButton", command=self._visor, state="disabled")
         self.btn_visor.pack(side="right")
-        self.btn_exportar = ttk.Button(af, text="Descargar video con subtítulos",
+        self.btn_exportar = ttk.Button(af, text="Crear video con subtítulos",
                                        command=self._dialogo_video, state="disabled")
         self.btn_exportar.pack(side="right", padx=6)
+
 
     # ---------- ajustes que se recuerdan ----------
     def _ajustes_persistentes(self):
@@ -2200,6 +2203,313 @@ class App:
         else:
             ttk.Button(b, text="Crear video", style="Acc.TButton", command=crear).pack(side="right", padx=6)
         generar()
+        d.grab_set()
+
+    # ---------- editor de texto y subtítulos ----------
+    def _editor(self):
+        if self.ocupado:
+            messagebox.showinfo(APP, "Espera a que termine el proceso en curso.")
+            return
+        if not self.segs:
+            messagebox.showinfo(APP, "Aún no hay texto. Transcribe un video o carga uno con su texto (pestaña 5).")
+            return
+        import copy
+        segs = copy.deepcopy(self.segs)
+        d = tk.Toplevel(self.root)
+        d.title("Editar texto y subtítulos")
+        d.transient(self.root)
+        d.geometry("980x640")
+        d.minsize(760, 480)
+        st = {"i": None, "cambios": False}
+
+        # búsqueda y reemplazo
+        fb = ttk.Frame(d, padding=(10, 8, 10, 0))
+        fb.pack(fill="x")
+        ttk.Label(fb, text="Buscar:").pack(side="left")
+        v_buscar, v_reempl = tk.StringVar(), tk.StringVar()
+        ttk.Entry(fb, textvariable=v_buscar, width=22).pack(side="left", padx=4)
+        ttk.Label(fb, text="Reemplazar por:").pack(side="left", padx=(8, 0))
+        ttk.Entry(fb, textvariable=v_reempl, width=22).pack(side="left", padx=4)
+        fb2 = ttk.Frame(d, padding=(10, 4, 10, 0))
+        fb2.pack(fill="x")
+        ttk.Label(fb2, text="Desplazar todos los tiempos (si los subtítulos van adelantados o atrasados):").pack(side="left")
+        v_desp = tk.DoubleVar(value=0.0)
+        ttk.Spinbox(fb2, from_=-600, to=600, increment=0.1, textvariable=v_desp, width=7).pack(side="left", padx=4)
+        ttk.Label(fb2, text="segundos").pack(side="left")
+
+        # lista
+        fl = ttk.Frame(d, padding=(10, 6, 10, 0))
+        fl.pack(fill="both", expand=True)
+        cols = ("n", "ini", "fin", "texto", "trad")
+        tv = ttk.Treeview(fl, columns=cols, show="headings", selectmode="extended")
+        for c, t, w, e in (("n", "#", 40, False), ("ini", "Inicio", 95, False), ("fin", "Fin", 95, False),
+                           ("texto", "Texto", 430, True), ("trad", "Traducción", 260, True)):
+            tv.heading(c, text=t, anchor="w")
+            tv.column(c, width=w, stretch=e, anchor="w")
+        sb = ttk.Scrollbar(fl, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        tv.tag_configure("hall", background="#fff3c4")
+
+        # edición de la línea
+        fe = ttk.LabelFrame(d, text="Línea seleccionada", padding=8)
+        fe.pack(fill="x", padx=10, pady=6)
+        v_ini, v_fin = tk.StringVar(), tk.StringVar()
+        ttk.Label(fe, text="Inicio:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(fe, textvariable=v_ini, width=13).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(fe, text="Fin:").grid(row=0, column=2, sticky="w", padx=(10, 0))
+        ttk.Entry(fe, textvariable=v_fin, width=13).grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Label(fe, text="formato hh:mm:ss.mmm", foreground="#888").grid(row=0, column=4, sticky="w", padx=6)
+        ttk.Label(fe, text="Texto:").grid(row=1, column=0, sticky="nw", pady=(6, 0))
+        t_txt = tk.Text(fe, height=3, wrap="word", font=("Segoe UI", 10), undo=True)
+        t_txt.grid(row=1, column=1, columnspan=5, sticky="ew", pady=(6, 0))
+        ttk.Label(fe, text="Traducción:").grid(row=2, column=0, sticky="nw", pady=(6, 0))
+        t_tr = tk.Text(fe, height=2, wrap="word", font=("Segoe UI", 10), undo=True, background="#f3faf6")
+        t_tr.grid(row=2, column=1, columnspan=5, sticky="ew", pady=(6, 0))
+        fe.columnconfigure(5, weight=1)
+
+        def a_seg(x):
+            x = x.strip().replace(",", ".")
+            if not x:
+                raise ValueError
+            partes = [float(p) for p in x.split(":")]
+            v = 0.0
+            for p in partes:
+                v = v * 60 + p
+            return v
+
+        def fmt(t):
+            return ts(t, ".")
+
+        def poblar(sel=None):
+            tv.delete(*tv.get_children())
+            q = v_buscar.get().strip().lower()
+            for i, sg in enumerate(segs):
+                tag = ("hall",) if q and (q in sg["text"].lower() or q in (sg.get("trad") or "").lower()) else ()
+                tv.insert("", "end", iid=str(i), values=(i + 1, fmt(sg["start"]), fmt(sg["end"]),
+                                                          sg["text"], sg.get("trad", "")), tags=tag)
+            if sel is not None and segs:
+                sel = max(0, min(len(segs) - 1, sel))
+                tv.selection_set(str(sel))
+                tv.see(str(sel))
+
+        def cargar_linea(i):
+            st["i"] = i
+            sg = segs[i]
+            v_ini.set(fmt(sg["start"]))
+            v_fin.set(fmt(sg["end"]))
+            t_txt.delete("1.0", "end")
+            t_txt.insert("1.0", sg["text"])
+            t_tr.delete("1.0", "end")
+            t_tr.insert("1.0", sg.get("trad", ""))
+
+        def guardar_linea():
+            i = st["i"]
+            if i is None or i >= len(segs):
+                return True
+            sg = segs[i]
+            try:
+                ini, fin = a_seg(v_ini.get()), a_seg(v_fin.get())
+            except ValueError:
+                messagebox.showwarning(APP, "Revisa los tiempos: usa el formato hh:mm:ss.mmm (por ejemplo 00:01:23.500).", parent=d)
+                return False
+            if fin <= ini:
+                messagebox.showwarning(APP, "El fin debe ser posterior al inicio.", parent=d)
+                return False
+            texto = t_txt.get("1.0", "end").strip()
+            trad = t_tr.get("1.0", "end").strip()
+            nuevo = dict(sg, start=ini, end=fin, text=texto or sg["text"])
+            if trad:
+                nuevo["trad"] = trad
+            else:
+                nuevo.pop("trad", None)
+                nuevo.pop("ver_trad", None)
+            if nuevo != sg:
+                segs[i] = nuevo
+                st["cambios"] = True
+                tv.item(str(i), values=(i + 1, fmt(ini), fmt(fin), nuevo["text"], nuevo.get("trad", "")))
+            return True
+
+        def al_elegir(e=None):
+            sel = tv.selection()
+            if not sel:
+                return
+            i = int(sel[0])
+            if st["i"] is not None and st["i"] != i:
+                if not guardar_linea():
+                    tv.selection_set(str(st["i"]))
+                    return
+            cargar_linea(i)
+
+        tv.bind("<<TreeviewSelect>>", al_elegir)
+
+        def seleccion():
+            return sorted(int(x) for x in tv.selection())
+
+        def unir():
+            if not guardar_linea():
+                return
+            sel = seleccion()
+            if len(sel) == 1 and sel[0] > 0:
+                sel = [sel[0] - 1, sel[0]]
+            if len(sel) < 2:
+                return
+            a, b = sel[0], sel[-1]
+            grupo = segs[a:b + 1]
+            nuevo = dict(grupo[0], end=grupo[-1]["end"], text=" ".join(x["text"] for x in grupo))
+            trads = [x.get("trad") for x in grupo if x.get("trad")]
+            if trads:
+                nuevo["trad"] = " ".join(trads)
+            segs[a:b + 1] = [nuevo]
+            st["cambios"], st["i"] = True, None
+            poblar(a)
+
+        def dividir():
+            if not guardar_linea():
+                return
+            i = st["i"]
+            if i is None:
+                return
+            sg = segs[i]
+            pos = len(t_txt.get("1.0", "insert"))
+            texto = sg["text"]
+            if pos <= 0 or pos >= len(texto):
+                r = texto.rfind(" ", 0, len(texto) // 2 + 10)
+                pos = r if r > 0 else len(texto) // 2
+            a, b = texto[:pos].strip(), texto[pos:].strip()
+            m = re.match(r"^[,.;:!?…)\]»”]+", b)   # la puntuación queda con la primera parte
+            if m:
+                a, b = a + m.group(0), b[m.end():].strip()
+            if not a or not b:
+                return
+            corte = sg["start"] + (sg["end"] - sg["start"]) * len(a) / max(1, len(a) + len(b))
+            s1 = dict(sg, end=corte, text=a)
+            s2 = dict(sg, start=corte, text=b)
+            for x in (s1, s2):
+                x.pop("trad", None)
+            if sg.get("trad"):
+                s1["trad"] = sg["trad"]
+            segs[i:i + 1] = [s1, s2]
+            st["cambios"], st["i"] = True, None
+            poblar(i)
+
+        def eliminar():
+            sel = seleccion()
+            if not sel or not messagebox.askyesno(APP, f"¿Eliminar {len(sel)} línea(s)?", parent=d):
+                return
+            for i in reversed(sel):
+                del segs[i]
+            st["cambios"], st["i"] = True, None
+            poblar(sel[0])
+
+        def insertar():
+            if not guardar_linea():
+                return
+            i = st["i"] if st["i"] is not None else len(segs) - 1
+            ini = segs[i]["end"] if segs else 0.0
+            fin = segs[i + 1]["start"] if i + 1 < len(segs) else ini + 2.0
+            if fin - ini < 0.5:
+                fin = ini + 2.0
+            segs.insert(i + 1, {"start": ini, "end": fin, "text": "Nuevo texto", "src": "", "wall": None})
+            st["cambios"], st["i"] = True, None
+            poblar(i + 1)
+            t_txt.focus_set()
+            t_txt.tag_add("sel", "1.0", "end-1c")
+
+        def reemplazar_todo():
+            guardar_linea()
+            q, r = v_buscar.get(), v_reempl.get()
+            if not q:
+                return
+            n = 0
+            patron = re.compile(re.escape(q), re.IGNORECASE)
+            for sg in segs:
+                for k in ("text", "trad"):
+                    if sg.get(k):
+                        nuevo, c = patron.subn(r, sg[k])
+                        if c:
+                            sg[k], n = nuevo, n + c
+            st["cambios"] = st["cambios"] or n > 0
+            sel = st["i"]
+            st["i"] = None
+            poblar(sel)
+            messagebox.showinfo(APP, f"{n} reemplazo(s).", parent=d)
+
+        def desplazar():
+            guardar_linea()
+            try:
+                dt = float(v_desp.get())
+            except (tk.TclError, ValueError):
+                return
+            if not dt:
+                return
+            for sg in segs:
+                sg["start"] = max(0.0, sg["start"] + dt)
+                sg["end"] = max(sg["start"] + 0.2, sg["end"] + dt)
+            st["cambios"] = True
+            sel = st["i"]
+            st["i"] = None
+            poblar(sel)
+            v_desp.set(0.0)
+
+        v_buscar.trace_add("write", lambda *a: (guardar_linea(), poblar(st["i"])))
+        ttk.Button(fb2, text="Aplicar", command=desplazar).pack(side="left", padx=4)
+        ttk.Button(fb, text="Reemplazar todo", command=reemplazar_todo).pack(side="left", padx=(8, 0))
+
+        fh = ttk.Frame(fe)
+        fh.grid(row=3, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        for texto, cmd in (("Unir con la anterior / unir selección", unir), ("Dividir en el cursor", dividir),
+                           ("Insertar línea después", insertar), ("Eliminar", eliminar)):
+            ttk.Button(fh, text=texto, command=cmd).pack(side="left", padx=(0, 6))
+
+        def aplicar(cerrar=True):
+            if not guardar_linea():
+                return False
+            segs.sort(key=lambda x: x["start"])
+            self.segs = segs
+            self._repintar(conservar=True)
+            self._autoguardar(srt=True)
+            self.estado.config(text=f"Cambios guardados · {len(segs)} líneas.")
+            st["cambios"] = False
+            if cerrar:
+                d.destroy()
+            return True
+
+        def crear_video():
+            if not aplicar():
+                return
+            if self.op_video.get():
+                if not self._subtitular_automatico():
+                    messagebox.showinfo(APP, "Este archivo no tiene imagen (es solo audio).")
+            else:
+                self._dialogo_video()
+
+        def cerrar():
+            if st["cambios"] or (st["i"] is not None and guardar_linea() and st["cambios"]):
+                r = messagebox.askyesnocancel(APP, "¿Guardar los cambios antes de cerrar?", parent=d)
+                if r is None:
+                    return
+                if r:
+                    aplicar()
+                    return
+            d.destroy()
+
+        fbot = ttk.Frame(d, padding=(10, 0, 10, 10))
+        fbot.pack(fill="x")
+        ttk.Button(fbot, text="Formato de subtítulos…",
+                   command=lambda: self._dialogo_video(solo_formato=True)).pack(side="left")
+        ttk.Button(fbot, text="Cerrar", command=cerrar).pack(side="right")
+        tiene_video = False
+        try:
+            tiene_video = bool(self.media and info_media(self.media)[0])
+        except Exception:
+            pass
+        if tiene_video:
+            ttk.Button(fbot, text="Guardar y crear video", command=crear_video).pack(side="right", padx=6)
+        ttk.Button(fbot, text="Guardar cambios", style="Acc.TButton", command=aplicar).pack(side="right")
+        d.protocol("WM_DELETE_WINDOW", cerrar)
+        poblar(0)
         d.grab_set()
 
     def _iniciar_video(self, media, segs, salida, cfg):
