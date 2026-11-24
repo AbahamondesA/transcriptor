@@ -15,6 +15,7 @@ import time
 import queue
 import datetime
 import threading
+import types
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -423,7 +424,7 @@ class Motor:
                 log("Usando procesador (CPU).")
             self.model, self.nombre = modelo, nombre
 
-    def palabras(self, ruta, idioma, al_avanzar=lambda pct: None, stop=None):
+    def palabras(self, ruta, idioma, al_avanzar=lambda pct: None, stop=None, esperar=lambda: None):
         """Palabras reconocidas con su tiempo, para sincronizar un texto propio."""
         audio = decodificar(ruta)
         dur = len(audio) / SR
@@ -431,6 +432,7 @@ class Motor:
                                         word_timestamps=True, condition_on_previous_text=False)
         out = []
         for s in segs:
+            esperar()
             if stop is not None and stop.is_set():
                 break
             for w in (s.words or []):
@@ -438,10 +440,19 @@ class Motor:
             al_avanzar(min(100, s.end / max(dur, 1) * 100))
         return out, dur
 
-    def archivo(self, ruta, idioma):
+    def archivo(self, ruta, idioma, desde=0.0):
+        """Transcribe desde el segundo `desde` (para reanudar). Los tiempos son del archivo completo."""
         audio = decodificar(ruta)
-        return self.model.transcribe(audio, language=idioma, beam_size=5, vad_filter=True,
-                                     condition_on_previous_text=False)
+        total = len(audio) / SR
+        if desde > 0:
+            audio = audio[int(desde * SR):]
+        segs, _ = self.model.transcribe(audio, language=idioma, beam_size=5, vad_filter=True,
+                                        condition_on_previous_text=False)
+
+        def corridos():
+            for x in segs:
+                yield types.SimpleNamespace(start=x.start + desde, end=x.end + desde, text=x.text)
+        return corridos(), types.SimpleNamespace(duration=total)
 
     def fragmento(self, audio, idioma, contexto=None, beam=1):
         segs, _ = self.model.transcribe(
@@ -627,6 +638,14 @@ class Captura:
 
     def _procesar_bucle(self):
         while not self.stop.is_set():
+            if not self.app.pausa.is_set():        # en pausa: se descarta el audio
+                for c in self.canales:
+                    while not c.q.empty():
+                        c.q.get_nowait()
+                    c.buf = np.zeros(0, np.float32)
+                    c.t0, c.hay_voz = None, False
+                time.sleep(0.2)
+                continue
             ahora = time.time()
             for c in self.canales:
                 while True:
@@ -749,6 +768,10 @@ class App:
         self.cola = []
         self._ultima_carpeta = os.path.expanduser("~")
         self.stop_evt = threading.Event()
+        self.pausa = threading.Event()      # activo = corriendo; desactivado = en pausa
+        self.pausa.set()
+        self._t_pausa = None
+        self._reanudable = None
         self.captura = None
         self.flotante = None
         self.altavoces, self.micros = [], []
@@ -966,8 +989,10 @@ class App:
         fb.pack(fill="x", pady=(2, 0))
         self.prog = ttk.Progressbar(fb, mode="determinate", maximum=100)
         self.prog.pack(side="left", fill="x", expand=True)
-        self.btn_det = ttk.Button(fb, text="Detener", command=self._detener, state="disabled")
-        self.btn_det.pack(side="left", padx=(8, 0))
+        self.btn_pausa = ttk.Button(fb, text="⏸ Pausar", command=self._pausa_o_reanudar, state="disabled", width=13)
+        self.btn_pausa.pack(side="left", padx=(8, 0))
+        self.btn_det = ttk.Button(fb, text="■ Detener", command=self._detener, state="disabled", width=11)
+        self.btn_det.pack(side="left", padx=(6, 0))
         # barra general de la cola (solo visible mientras corre una cola)
         self.panel_cola = ttk.Frame(pf)
         fc = ttk.Frame(self.panel_cola)
@@ -1130,6 +1155,10 @@ class App:
                         pass
                 elif tipo == "tp_listo":
                     self._tp_listo(*m[1:])
+                elif tipo == "reanudable":
+                    self._reanudable = m[1]
+                    self.estado.config(text=f"Detenido en {ts_corto(m[1][2])}. Usa «▶ Reanudar» para seguir desde ahí.")
+                    self._botones()
                 elif tipo == "cola_inicio":
                     self._t_cola = time.time()
                     self.prog_cola["value"] = 0
@@ -1390,6 +1419,7 @@ class App:
                         if self.stop_evt.is_set():
                             break
                         lote = segs[i:i + 24]
+                        self._esperar()
                         if i == 0:
                             self.emit(("etapa", "Traduciendo la transcripción…"))
                         trads = self.traductor.traducir_lista([s["text"] for s in lote], direccion, self._log)
@@ -1469,9 +1499,69 @@ class App:
     def _idioma(self):
         return dict(IDIOMAS).get(self.idioma.get(), "es")
 
+    # ---------- pausar / continuar / detener / reanudar ----------
+    def _esperar(self):
+        """Los procesos se quedan aquí mientras está en pausa."""
+        while not self.pausa.is_set() and not self.stop_evt.is_set():
+            time.sleep(0.2)
+
+    def _botones(self):
+        activo = self.ocupado or bool(self.captura)
+        if activo:
+            self.btn_pausa.config(state="normal", text="⏸ Pausar" if self.pausa.is_set() else "▶ Continuar")
+            self.btn_det.config(state="normal")
+        else:
+            hay = bool(self._reanudable) or any(it["estado"].startswith("Detenido") for it in self.cola)
+            self.btn_pausa.config(state="normal" if hay else "disabled", text="▶ Reanudar" if hay else "⏸ Pausar")
+            self.btn_det.config(state="disabled")
+
+    def _pausa_o_reanudar(self):
+        if not (self.ocupado or self.captura):
+            self._reanudar()
+            return
+        if self.pausa.is_set():
+            self.pausa.clear()
+            self._t_pausa = time.time()
+            self._etapa_antes = self.lbl_etapa.cget("text")
+            self.lbl_etapa.config(text="⏸ En pausa — " + self._etapa_antes)
+            self.lbl_eta.config(text="en pausa")
+            if str(self.prog.cget("mode")) == "indeterminate":
+                self.prog.stop()
+        else:
+            dt = time.time() - (self._t_pausa or time.time())
+            for attr in ("_t_etapa", "_t_cola", "_t_vivo"):
+                if getattr(self, attr):
+                    setattr(self, attr, getattr(self, attr) + dt)
+            self._t_pausa = None
+            self.pausa.set()
+            self.lbl_etapa.config(text=getattr(self, "_etapa_antes", self.lbl_etapa.cget("text")))
+            self.lbl_eta.config(text="")
+            if str(self.prog.cget("mode")) == "indeterminate":
+                self.prog.start(12)
+        self._botones()
+
+    def _reanudar(self):
+        if self.ocupado:
+            return
+        if any(it["estado"].startswith("Detenido") for it in self.cola):
+            self._procesar_cola()
+            return
+        r = self._reanudable
+        if not r:
+            return
+        self._reanudable = None
+        ruta, titulo, desde = r
+        self._ocupar(True)
+        self.stop_evt.clear()
+        self.pausa.set()
+        self.estado.config(text=f"Reanudando desde {ts_corto(desde)}…")
+        threading.Thread(target=self._job_archivo, args=(ruta, titulo, desde), daemon=True).start()
+
     def _ocupar(self, si):
         self.ocupado = si
-        self.btn_det.config(state="normal" if si else "disabled")
+        if si:
+            self.pausa.set()
+        self.root.after(0, self._botones)
         if si:
             self._set_progreso(0)
             self.lbl_eta.config(text="")
@@ -1480,8 +1570,11 @@ class App:
                 self.prog.stop()
                 self.prog.config(mode="determinate")
             self.lbl_eta.config(text="")
-            if self.lbl_etapa.cget("text").endswith("…"):
-                self.lbl_etapa.config(text=self.lbl_etapa.cget("text").rstrip("…") + " — terminado.")
+            t = self.lbl_etapa.cget("text").replace("⏸ En pausa — ", "")
+            if self.stop_evt.is_set():
+                self.lbl_etapa.config(text="■ Detenido — " + t.rstrip("…").replace(" — terminado.", ""))
+            elif t.endswith("…"):
+                self.lbl_etapa.config(text=t.rstrip("…") + " — terminado.")
 
     @staticmethod
     def _fmt_resta(seg):
@@ -1735,7 +1828,7 @@ class App:
                     def av(pct):
                         self.emit(("progreso", pct))
                         self._log(f"Sincronizando texto con la voz… {pct:.0f}%")
-                    palabras, dur = self.motor.palabras(video, idioma, av, self.stop_evt)
+                    palabras, dur = self.motor.palabras(video, idioma, av, self.stop_evt, self._esperar)
                     if self.stop_evt.is_set():
                         self.emit(("tp_listo", None, video, titulo, "Detenido."))
                         return
@@ -1786,7 +1879,7 @@ class App:
         if self.ocupado:
             return
         for it in self.cola:          # lo detenido antes vuelve a quedar pendiente
-            if it["estado"] == "Detenido" or it["estado"].startswith("En curso"):
+            if it["estado"].startswith("Detenido") or it["estado"].startswith("En curso"):
                 it["estado"] = "Pendiente"
                 v = list(self.arbol.item(it["iid"], "values"))
                 v[2] = "Pendiente"
@@ -1797,6 +1890,7 @@ class App:
         op = {"word": self.op_word.get(), "trad": self.op_trad.get(), "dir": DIRECCIONES[self.op_dir.get()],
               "video": self.op_video.get(), "subs": self.op_subs.get(), "destino": self.op_destino.get(),
               "modelo": self.modelo.get(), "idioma": self._idioma(), "con_video": self.con_video.get()}
+        self._reanudable = None
         self._ocupar(True)
         self.stop_evt.clear()
         self.btn_cola.config(state="disabled")
@@ -1819,6 +1913,9 @@ class App:
             return
         self.emit(("cola_inicio",))
         while not self.stop_evt.is_set():
+            self._esperar()
+            if self.stop_evt.is_set():
+                break
             it = next((x for x in self.cola if x["estado"] == "Pendiente"), None)
             if it is None:
                 break
@@ -1845,25 +1942,45 @@ class App:
                     ruta, titulo = self._descargar(it["url"], op["con_video"])
                 else:
                     ruta, titulo = it["ruta"], os.path.splitext(it["nombre"])[0]
-                self._estado_item(it, "En curso: transcribiendo…")
-                fase("transcripcion", f"Transcribiendo: {os.path.basename(ruta)}…")
-                segs = self._transcribir_lista(ruta, op["idioma"], lambda pct: self._estado_item(
-                    it, f"En curso: transcribiendo {pct:.0f}%"))
-                if self.stop_evt.is_set():
-                    self._estado_item(it, "Detenido")
-                    break
+                if it.get("segs_listos"):          # ya transcrito antes de detener: no repetir
+                    segs = it["segs_listos"]
+                    for sg in segs:
+                        self.emit(("seg", sg))
+                else:
+                    self._estado_item(it, "En curso: transcribiendo…")
+                    fase("transcripcion", f"Transcribiendo: {os.path.basename(ruta)}…")
+                    previos, desde = it.pop("parcial", None), it.pop("desde", 0.0)
+                    segs = self._transcribir_lista(ruta, op["idioma"], lambda pct: self._estado_item(
+                        it, f"En curso: transcribiendo {pct:.0f}%"), desde, previos)
+                    if self.stop_evt.is_set():
+                        it["parcial"], it["desde"] = segs, (segs[-1]["end"] if segs else 0.0)
+                        it["ruta"] = ruta
+                        it.pop("url", None) if os.path.exists(ruta) else None
+                        self._estado_item(it, f"Detenido (en {ts_corto(it['desde'])})")
+                        it["estado"] = "Detenido"
+                        break
+                    it["segs_listos"] = segs
+                    it["ruta"] = ruta
+                    it.pop("url", None)
                 if not segs:
                     raise RuntimeError("No se detectó voz en el archivo.")
                 if op["trad"]:
                     self._estado_item(it, "En curso: traduciendo…")
                     fase("traduccion", f"Traduciendo: {os.path.basename(ruta)}…")
                     for i in range(0, len(segs), 24):
+                        self._esperar()
+                        if self.stop_evt.is_set():
+                            break
                         lote = segs[i:i + 24]
                         for sg, tr in zip(lote, self.traductor.traducir_lista([x["text"] for x in lote], op["dir"], self._log)):
                             sg["trad"] = tr
                         pct_t = (i + len(lote)) / len(segs) * 100
                         self.emit(("progreso", pct_t))
                         self._estado_item(it, f"En curso: traduciendo {pct_t:.0f}%")
+                    if self.stop_evt.is_set():
+                        self._estado_item(it, "Detenido (antes de traducir todo)")
+                        it["estado"] = "Detenido"
+                        break
                     self.emit(("cola_traducido",))
                 self._estado_item(it, "En curso: guardando…")
                 base = os.path.join(op["destino"], re.sub(r'[\\/:*?"<>|]+', "_", titulo)[:90])
@@ -1887,14 +2004,16 @@ class App:
                             self.emit(("progreso", pct))
                             self._estado_item(it, f"En curso: creando video {pct:.0f}%")
                         ok = video_subtitulado(ruta, segs_segun(segs, op["subs"]), base + " - subtitulado.mp4",
-                                               cargar_estilo(), prog_v, self.stop_evt)
+                                               cargar_estilo(), prog_v, self.stop_evt, self.pausa)
                         if not ok:
-                            self._estado_item(it, "Detenido")
+                            self._estado_item(it, "Detenido (falta el video)")
+                            it["estado"] = "Detenido"
                             break
                         extra = " + video"
                     else:
                         extra = " (sin video: es solo audio)"
                 self.emit(("cola_media", ruta, titulo))
+                it.pop("segs_listos", None)
                 self._estado_item(it, "Listo ✓" + extra)
                 fase("guardar", f"Listo: {it['nombre']}")
                 self.emit(("progreso", 100))
@@ -1909,11 +2028,14 @@ class App:
         it["estado"] = estado
         self.emit(("cola_item", it["iid"], estado))
 
-    def _transcribir_lista(self, ruta, idioma, al_avanzar):
-        segs_w, info = self.motor.archivo(ruta, idioma)
+    def _transcribir_lista(self, ruta, idioma, al_avanzar, desde=0.0, previos=None):
+        segs_w, info = self.motor.archivo(ruta, idioma, desde)
         dur = max(info.duration or 1, 1)
-        out, ult = [], -5
+        out, ult = list(previos or []), -5
+        for sg in out:
+            self.emit(("seg", sg))
         for s in segs_w:
+            self._esperar()
             if self.stop_evt.is_set():
                 break
             texto = s.text.strip()
@@ -1934,6 +2056,7 @@ class App:
         os.makedirs(destino, exist_ok=True)
 
         def hook(d):
+            self._esperar()
             if self.stop_evt.is_set():
                 raise yt_dlp.utils.DownloadCancelled("Cancelado")
             if d.get("status") == "downloading":
@@ -1976,7 +2099,8 @@ class App:
             return
         det = " (detenida)" if self.stop_evt.is_set() else ""
         self.estado.config(text=f"Cola terminada{det}: {hechos} listo(s), {fallos} con error.")
-        self._set_progreso(100)
+        if not det:
+            self._set_progreso(100)
         try:
             self.root.bell()
         except tk.TclError:
@@ -1986,24 +2110,30 @@ class App:
         if messagebox.askyesno(APP, msg):
             self._abrir_carpeta(destino_o_error)
 
-    def _job_archivo(self, ruta, titulo=None):
+    def _job_archivo(self, ruta, titulo=None, desde=0.0):
+        titulo = titulo or os.path.splitext(os.path.basename(ruta))[0]
         try:
             if self.motor.nombre != self.modelo.get():
                 self.emit(("etapa", "Cargando el modelo de voz (la primera vez se descarga)…", True))
             self.motor.cargar(self.modelo.get(), self._log)
             self.emit(("etapa", f"Transcribiendo: {os.path.basename(ruta)}…"))
             self._log("Transcribiendo… el texto aparece a medida que avanza.")
-            segs, info = self.motor.archivo(ruta, self._idioma())
+            segs, info = self.motor.archivo(ruta, self._idioma(), desde)
             dur = max(info.duration or 1, 1)
+            ultimo = desde
             for s in segs:
+                self._esperar()
                 if self.stop_evt.is_set():
                     break
+                ultimo = s.end
                 texto = s.text.strip()
                 if texto and not es_alucinacion(texto):
                     self.emit(("seg", {"start": s.start, "end": s.end, "text": texto, "src": "", "wall": None}))
                 self.emit(("progreso", min(100, s.end / dur * 100)))
                 self._log(f"Transcribiendo… {ts_corto(s.end)} de {ts_corto(dur)}")
-            self.emit(("fin", {"media": ruta, "titulo": titulo or os.path.splitext(os.path.basename(ruta))[0]}))
+            if self.stop_evt.is_set() and ultimo < dur - 1:
+                self.emit(("reanudable", (ruta, titulo, ultimo)))
+            self.emit(("fin", {"media": ruta, "titulo": titulo}))
         except Exception as e:
             log.exception("archivo")
             self.emit(("error", f"No se pudo transcribir:\n{e}\n\nDetalle en {LOG}"))
@@ -2093,6 +2223,7 @@ class App:
             self.captura = Captura(self, canales, self.vista_previa.get(), self._idioma())
             self.captura.iniciar()
             self.emit(("etapa", "● En vivo: escuchando y transcribiendo…", True))
+            self.root.after(0, self._botones)
             self._t_vivo = time.time()
             self._log("● Escuchando… habla o reproduce el audio de la reunión/video.")
         threading.Thread(target=arrancar, daemon=True).start()
@@ -2107,6 +2238,8 @@ class App:
     # ---------- detener / fin ----------
     def _detener(self):
         self.stop_evt.set()
+        self.pausa.set()
+        self.root.after(300, self._botones)
         if self.captura:
             self.captura.detener()
             self.captura = None
@@ -2127,7 +2260,8 @@ class App:
         self._ocupar(False)
         if datos:
             self.media, self.titulo = datos["media"], datos["titulo"]
-            self._set_progreso(100)
+            if not self.stop_evt.is_set():
+                self._set_progreso(100)
             self.btn_visor.config(state="normal")
             try:
                 self.btn_exportar.config(state="normal" if info_media(self.media)[0] else "disabled")
@@ -2673,7 +2807,7 @@ class App:
             try:
                 self._log("Creando video con subtítulos…")
                 self.emit(("etapa", f"Creando video con subtítulos: {os.path.basename(salida)}…"))
-                ok_ = video_subtitulado(media, segs, salida, cfg, prog, self.stop_evt)
+                ok_ = video_subtitulado(media, segs, salida, cfg, prog, self.stop_evt, self.pausa)
                 self.emit(("video_listo", salida if ok_ else None))
             except Exception as e:
                 log.exception("video subtitulado")
@@ -2907,7 +3041,23 @@ def vista_previa_subs(media, texto, cfg, t, salida_png, ancho=560):
     return salida_png
 
 
-def video_subtitulado(media, segs, salida, cfg, progreso, stop):
+def _suspender(proc, pausar):
+    """Pausa o reanuda un proceso externo (ffmpeg)."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x0800, False, proc.pid)   # PROCESS_SUSPEND_RESUME
+            if h:
+                (ctypes.windll.ntdll.NtSuspendProcess if pausar else ctypes.windll.ntdll.NtResumeProcess)(h)
+                ctypes.windll.kernel32.CloseHandle(h)
+        else:
+            import signal
+            os.kill(proc.pid, signal.SIGSTOP if pausar else signal.SIGCONT)
+    except Exception:
+        log.exception("pausar ffmpeg")
+
+
+def video_subtitulado(media, segs, salida, cfg, progreso, stop, pausa=None):
     """Crea un MP4 con la transcripción estampada en la imagen."""
     import subprocess
     import tempfile
@@ -2927,6 +3077,24 @@ def video_subtitulado(media, segs, salida, cfg, progreso, stop):
                             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
                             creationflags=_SIN_VENTANA)
     ultimas = []
+
+    def vigilar():   # pausa/continúa ffmpeg según el botón, y lo libera si se detiene
+        pausado = False
+        while proc.poll() is None:
+            quiere = pausa is not None and not pausa.is_set() and not stop.is_set()
+            if quiere != pausado:
+                _suspender(proc, quiere)
+                pausado = quiere
+            if stop.is_set():
+                if pausado:
+                    _suspender(proc, False)
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                return
+            time.sleep(0.2)
+    threading.Thread(target=vigilar, daemon=True).start()
     for linea in proc.stderr:
         ultimas = (ultimas + [linea.strip()])[-15:]
         m = re.search(r"time=(\d+):(\d+):(\d+\.?\d*)", linea)

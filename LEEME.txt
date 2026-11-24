@@ -81,6 +81,15 @@ BARRAS DE AVANCE
 - En vivo: indica que está escuchando y el tiempo transcurrido.
 - Cada archivo de la cola muestra además su propio estado y porcentaje en la lista.
 
+PAUSAR, DETENER Y REANUDAR
+- "⏸ Pausar": congela el proceso en curso (transcripción, descarga, sincronización,
+  traducción o creación de video) sin perder nada. Cambia a "▶ Continuar".
+- "■ Detener": para el proceso. Lo ya transcrito se conserva y se guarda.
+- "▶ Reanudar" (aparece tras detener): sigue desde el punto exacto donde se detuvo,
+  sin volver a transcribir lo anterior. En la cola retoma el archivo detenido y luego
+  los pendientes.
+- En vivo, la pausa deja de escuchar hasta que presiones Continuar.
+
 CONSEJOS
 - Modelo: "small" es el equilibrio recomendado en español. Si en vivo va atrasado,
   usa "base"; si quieres máxima precisión en archivos, "large-v3-turbo" (más lento sin GPU).
