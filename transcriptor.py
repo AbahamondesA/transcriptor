@@ -220,6 +220,152 @@ def segs_segun(segs, vista):
     return out
 
 
+# ───────────────────────── texto propio → subtítulos ─────────────────────────
+EXT_TEXTO = (".txt", ".docx", ".srt", ".vtt", ".md")
+
+
+def leer_texto(ruta):
+    ext = os.path.splitext(ruta)[1].lower()
+    if ext == ".docx":
+        from docx import Document
+        return "\n".join(p.text for p in Document(ruta).paragraphs)
+    datos = open(ruta, "rb").read()
+    for enc in ("utf-8-sig", "utf-16", "cp1252", "latin-1"):
+        try:
+            t = datos.decode(enc)
+            if enc == "utf-16" and not datos[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                continue
+            return t
+        except UnicodeDecodeError:
+            continue
+    return datos.decode("latin-1", errors="replace")
+
+
+def leer_subtitulos(texto):
+    """Lee SRT o VTT y devuelve segmentos con sus tiempos."""
+    patron = re.compile(r"(\d+:)?(\d{1,2}):(\d{2})[.,](\d{1,3})\s*-->\s*(\d+:)?(\d{1,2}):(\d{2})[.,](\d{1,3})")
+
+    def seg(h, m, s, ms):
+        return int((h or "0:")[:-1]) * 3600 + int(m) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000
+
+    out = []
+    for bloque in re.split(r"\n\s*\n", texto.replace("\r", "")):
+        lineas = [l for l in bloque.split("\n") if l.strip()]
+        for k, l in enumerate(lineas):
+            m = patron.search(l)
+            if m:
+                g = m.groups()
+                txt = " ".join(re.sub(r"<[^>]+>", "", x).strip() for x in lineas[k + 1:]).strip()
+                if txt:
+                    out.append({"start": seg(*g[0:4]), "end": seg(*g[4:8]), "text": txt, "src": "", "wall": None})
+                break
+    return out
+
+
+def es_subtitulo(texto):
+    return bool(re.search(r"\d{1,2}:\d{2}[.,]\d{1,3}\s*-->", texto))
+
+
+def dividir_en_subtitulos(texto, max_car=84):
+    """Corta el texto en trozos aptos para subtítulos, respetando frases y comas."""
+    trozos = []
+    for parrafo in re.split(r"\n+", texto):
+        parrafo = re.sub(r"\s+", " ", parrafo).strip()
+        if not parrafo:
+            continue
+        for frase in re.split(r"(?<=[.!?…:;])\s+", parrafo):
+            while len(frase) > max_car:
+                corte = -1
+                for sep in (", ", " y ", " o ", " que ", " pero ", " and ", " ", ):
+                    corte = frase.rfind(sep, max_car // 3, max_car)
+                    if corte > 0:
+                        corte += 1 if sep == ", " else 0
+                        break
+                if corte <= 0:
+                    corte = max_car
+                trozos.append(frase[:corte].strip())
+                frase = frase[corte:].strip()
+            if frase:
+                trozos.append(frase)
+    return trozos
+
+
+def _norm(p):
+    import unicodedata
+    p = unicodedata.normalize("NFKD", p.lower())
+    return "".join(c for c in p if c.isalnum())
+
+
+def alinear_texto(trozos, palabras, duracion):
+    """Asigna tiempos a cada trozo de texto según las palabras reconocidas en el audio.
+    palabras: lista de (inicio, fin, palabra). Devuelve (segmentos, % de coincidencia)."""
+    from difflib import SequenceMatcher
+    U, dueño = [], []
+    for k, t in enumerate(trozos):
+        for w in t.split():
+            n = _norm(w)
+            if n:
+                U.append(n)
+                dueño.append(k)
+    R = [_norm(w) for _, _, w in palabras]
+    tiempos = [None] * len(U)
+    coincid = 0
+    if U and R:
+        sm = SequenceMatcher(None, U, R, autojunk=False)
+        for a, b, n in sm.get_matching_blocks():
+            for k in range(n):
+                tiempos[a + k] = (palabras[b + k][0], palabras[b + k][1])
+            coincid += n
+    pct = coincid / max(1, len(U))
+    if pct < 0.25:
+        # texto distinto al audio (p. ej. una traducción): reparte en proporción al habla
+        if R:
+            tiempos = [palabras[min(len(R) - 1, int(i * len(R) / len(U)))][0:2] for i in range(len(U))]
+        else:
+            paso = duracion / max(1, len(U))
+            tiempos = [(i * paso, (i + 1) * paso) for i in range(len(U))]
+    else:
+        # interpola las palabras sin coincidencia entre sus vecinas
+        conocidos = [i for i, t in enumerate(tiempos) if t]
+        for i in range(len(U)):
+            if tiempos[i]:
+                continue
+            ant = max((j for j in conocidos if j < i), default=None)
+            sig = min((j for j in conocidos if j > i), default=None)
+            if ant is None and sig is None:
+                tiempos[i] = (0, 0)
+            elif ant is None:
+                tiempos[i] = (max(0, tiempos[sig][0] - 0.3 * (sig - i)),) * 2
+            elif sig is None:
+                tiempos[i] = (min(duracion, tiempos[ant][1] + 0.3 * (i - ant)),) * 2
+            else:
+                f = (i - ant) / (sig - ant)
+                t = tiempos[ant][1] + f * (tiempos[sig][0] - tiempos[ant][1])
+                tiempos[i] = (t, t)
+    segs = []
+    for k, t in enumerate(trozos):
+        ts_k = [tiempos[i] for i in range(len(U)) if dueño[i] == k]
+        if not ts_k:
+            continue
+        segs.append({"start": min(x[0] for x in ts_k), "end": max(x[1] for x in ts_k),
+                     "text": t, "src": "", "wall": None})
+    # orden, sin solapes y duración mínima legible
+    for i, s in enumerate(segs):
+        if i and s["start"] < segs[i - 1]["end"]:
+            s["start"] = segs[i - 1]["end"]
+        s["end"] = max(s["end"], s["start"] + 0.8)
+    for i in range(len(segs) - 1):
+        sig = segs[i + 1]["start"]
+        segs[i]["end"] = min(max(segs[i]["end"] + 0.4, segs[i]["start"] + 1.2), max(sig, segs[i]["start"] + 0.5))
+        if segs[i + 1]["start"] < segs[i]["end"]:
+            segs[i + 1]["start"] = segs[i]["end"]
+            segs[i + 1]["end"] = max(segs[i + 1]["end"], segs[i + 1]["start"] + 0.8)
+    if duracion:
+        for s in segs:
+            s["end"] = min(s["end"], duracion)
+    return segs, pct
+
+
 # ───────────────────────── lectura de audio ─────────────────────────
 def decodificar(ruta):
     """Extrae el audio de cualquier archivo como mono 16 kHz float32.
@@ -276,6 +422,21 @@ class Motor:
                                       cpu_threads=max(2, (os.cpu_count() or 4) - 1))
                 log("Usando procesador (CPU).")
             self.model, self.nombre = modelo, nombre
+
+    def palabras(self, ruta, idioma, al_avanzar=lambda pct: None, stop=None):
+        """Palabras reconocidas con su tiempo, para sincronizar un texto propio."""
+        audio = decodificar(ruta)
+        dur = len(audio) / SR
+        segs, _ = self.model.transcribe(audio, language=idioma, beam_size=5, vad_filter=True,
+                                        word_timestamps=True, condition_on_previous_text=False)
+        out = []
+        for s in segs:
+            if stop is not None and stop.is_set():
+                break
+            for w in (s.words or []):
+                out.append((w.start, w.end, w.word.strip()))
+            al_avanzar(min(100, s.end / max(dur, 1) * 100))
+        return out, dur
 
     def archivo(self, ruta, idioma):
         audio = decodificar(ruta)
@@ -756,6 +917,34 @@ class App:
         self.tr_in.bind("<Control-Return>", lambda e: (self._traducir_texto(), "break")[1])
         f4.columnconfigure(0, weight=1)
         f4.columnconfigure(1, weight=1)
+        # 5) Video + texto propio
+        f5 = ttk.Frame(nb, padding=10)
+        nb.add(f5, text="  5 · Video + texto propio  ")
+        self.tp_video = tk.StringVar()
+        self.tp_archivo = tk.StringVar()
+        ttk.Label(f5, text="Video:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(f5, textvariable=self.tp_video).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(f5, text="Examinar…", command=self._tp_elegir_video).grid(row=0, column=2)
+        ttk.Label(f5, text="Texto:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(f5, textvariable=self.tp_archivo).grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
+        ttk.Button(f5, text="Examinar…", command=self._tp_elegir_texto).grid(row=1, column=2, pady=(6, 0))
+        ttk.Label(f5, text="…o pega el texto aquí (si eliges un archivo, se usa el archivo):",
+                  foreground="#666").grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.tp_texto = tk.Text(f5, height=4, wrap="word", font=("Segoe UI", 10), undo=True)
+        self.tp_texto.grid(row=3, column=0, columnspan=3, sticky="ew")
+        fo = ttk.Frame(f5)
+        fo.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Label(fo, text="Largo máximo de cada subtítulo:").pack(side="left")
+        self.tp_largo = tk.IntVar(value=84)
+        ttk.Spinbox(fo, from_=30, to=160, textvariable=self.tp_largo, width=5).pack(side="left", padx=4)
+        ttk.Label(fo, text="caracteres").pack(side="left")
+        ttk.Button(fo, text="Sincronizar y cargar subtítulos", style="Acc.TButton",
+                   command=self._tp_procesar).pack(side="right")
+        ttk.Label(f5, text="TXT, Word o texto pegado: se sincroniza solo con la voz del video. "
+                           "SRT o VTT: se usan sus tiempos tal cual. Luego puedes revisar, traducir y crear el video.",
+                  foreground="#666").grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        f5.columnconfigure(1, weight=1)
+
         nb.bind("<<NotebookTabChanged>>", lambda e: self._cargar_dispositivos(silencioso=True)
                 if nb.index("current") == 2 and not self.altavoces else None)
 
@@ -863,6 +1052,8 @@ class App:
                         self.btn_exportar.config(state="normal" if info_media(self.media)[0] else "disabled")
                     except Exception:
                         pass
+                elif tipo == "tp_listo":
+                    self._tp_listo(*m[1:])
                 elif tipo == "cola_fin":
                     self._cola_fin(*m[1:])
                 elif tipo == "lineas_trad":
@@ -1345,6 +1536,106 @@ class App:
         for r in self.root.tk.splitlist(evento.data):
             rutas += self._medios_de_carpeta(r) if os.path.isdir(r) else [r]
         self._poner_archivos(rutas, iniciar=True)
+
+    # ---------- 5) video + texto propio ----------
+    def _tp_elegir_video(self):
+        p = filedialog.askopenfilename(title="Elige el video", initialdir=self._ultima_carpeta, filetypes=[
+            ("Video y audio", " ".join("*" + e for e in EXT_MEDIA)), ("Todos", "*.*")])
+        if p:
+            self.tp_video.set(p)
+            self._ultima_carpeta = os.path.dirname(p)
+            base = os.path.splitext(p)[0]
+            if not self.tp_archivo.get():
+                for ext in (".srt", ".vtt", ".txt", ".docx"):
+                    if os.path.exists(base + ext):
+                        self.tp_archivo.set(base + ext)
+                        break
+
+    def _tp_elegir_texto(self):
+        p = filedialog.askopenfilename(title="Elige el texto del video", initialdir=self._ultima_carpeta,
+                                       filetypes=[("Texto y subtítulos", "*.txt *.docx *.srt *.vtt *.md"),
+                                                  ("Todos", "*.*")])
+        if p:
+            self.tp_archivo.set(p)
+
+    def _tp_procesar(self):
+        if self.ocupado:
+            return
+        video = self.tp_video.get().strip().strip('"')
+        if not os.path.isfile(video):
+            messagebox.showwarning(APP, "Elige el video.")
+            return
+        arch = self.tp_archivo.get().strip().strip('"')
+        try:
+            texto = leer_texto(arch) if arch else self.tp_texto.get("1.0", "end")
+        except Exception as e:
+            messagebox.showerror(APP, f"No se pudo leer el texto:\n{e}")
+            return
+        if not texto.strip():
+            messagebox.showwarning(APP, "Elige un archivo de texto o pega el texto del video.")
+            return
+        largo = max(30, min(160, int(self.tp_largo.get() or 84)))
+        self._ocupar(True)
+        self.stop_evt.clear()
+        modelo, idioma = self.modelo.get(), self._idioma()
+
+        def job():
+            try:
+                titulo = os.path.splitext(os.path.basename(video))[0]
+                if es_subtitulo(texto):
+                    segs = leer_subtitulos(texto)
+                    nota = f"Se usaron los tiempos del archivo de subtítulos ({len(segs)} subtítulos)."
+                else:
+                    trozos = dividir_en_subtitulos(texto, largo)
+                    self.motor.cargar(modelo, self._log)
+                    self._log("Escuchando el video para sincronizar el texto…")
+
+                    def av(pct):
+                        self.emit(("progreso", pct))
+                        self._log(f"Sincronizando texto con la voz… {pct:.0f}%")
+                    palabras, dur = self.motor.palabras(video, idioma, av, self.stop_evt)
+                    if self.stop_evt.is_set():
+                        self.emit(("tp_listo", None, video, titulo, "Detenido."))
+                        return
+                    segs, pct = alinear_texto(trozos, palabras, dur)
+                    if pct >= 0.6:
+                        nota = f"Texto sincronizado con la voz ({pct:.0%} de las palabras coinciden)."
+                    elif pct >= 0.25:
+                        nota = (f"Sincronizado de forma aproximada: solo {pct:.0%} de las palabras coinciden con lo "
+                                "que se escucha. Revisa los tiempos en el visor.")
+                    else:
+                        nota = ("El texto no coincide con lo que se dice (¿otro idioma?): se repartió a lo largo de "
+                                "la voz del video. Revisa el resultado en el visor.")
+                self.emit(("tp_listo", segs, video, titulo, nota))
+            except Exception as e:
+                log.exception("texto propio")
+                self.emit(("tp_listo", None, video, "", f"No se pudo sincronizar: {e}"))
+        threading.Thread(target=job, daemon=True).start()
+
+    def _tp_listo(self, segs, video, titulo, nota):
+        self._ocupar(False)
+        if not segs:
+            messagebox.showerror(APP, nota)
+            self.estado.config(text=nota)
+            return
+        self._limpiar(forzar=True)
+        self.segs = segs
+        self.media, self.titulo = video, titulo
+        self._repintar()
+        self.prog["value"] = 100
+        self.btn_visor.config(state="normal")
+        try:
+            tiene_video = info_media(video)[0]
+        except Exception:
+            tiene_video = False
+        self.btn_exportar.config(state="normal" if tiene_video else "disabled")
+        self._autoguardar(srt=True)
+        self.estado.config(text=nota)
+        if tiene_video and messagebox.askyesno(
+                APP, f"{nota}\n\n{len(segs)} subtítulos cargados. Puedes revisarlos o traducirlos en la lista "
+                     "(clic derecho) y verlos con «Ver video con transcripción sincronizada».\n\n"
+                     "¿Abrir ahora el editor para crear el video con subtítulos?"):
+            self._dialogo_video()
 
     # ---------- 1) cola automática ----------
     def _procesar_cola(self):

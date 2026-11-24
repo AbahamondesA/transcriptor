@@ -40,6 +40,14 @@ TRADUCTOR INGLÉS ↔ ESPAÑOL (sin internet una vez descargado)
 - En vivo: marca "Traducir en vivo" para ver la traducción de cada frase de la reunión.
 - La primera vez se descarga cada sentido (~150 MB). Modelos OPUS-MT (U. de Helsinki).
 
+VIDEO + TEXTO PROPIO (pestaña 5)
+- Elige un video y su texto: TXT, Word, SRT, VTT, o pégalo en el cuadro.
+- TXT/Word/pegado: el texto se corta en subtítulos y se sincroniza solo con la voz del
+  video (respeta tu texto exacto, solo le pone los tiempos). Si el texto está en otro
+  idioma que el audio, se reparte a lo largo de la voz (revísalo en el visor).
+- SRT/VTT: se usan sus tiempos tal cual.
+- Luego puedes revisar o traducir líneas (clic derecho) y crear el video con subtítulos.
+
 VIDEO CON SUBTÍTULOS INTEGRADOS
 - Después de transcribir un video (archivo o enlace), usa "Descargar video con subtítulos".
   Se abre un editor con vista previa real donde controlas tipo de letra, tamaño,
