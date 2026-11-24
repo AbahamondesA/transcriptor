@@ -757,6 +757,7 @@ class App:
         self._ui()
         root.protocol("WM_DELETE_WINDOW", self._salir)
         root.after(100, self._bucle)
+        self._ajustes_persistentes()
         # arrastrar y soltar archivos o carpetas sobre la ventana
         try:
             from tkinterdnd2 import DND_FILES
@@ -792,6 +793,10 @@ class App:
         ttk.Label(top, text="Idioma:").pack(side="left")
         self.idioma = tk.StringVar(value=IDIOMAS[0][0])
         ttk.Combobox(top, textvariable=self.idioma, values=[i[0] for i in IDIOMAS], width=22, state="readonly").pack(side="left", padx=4)
+        self.op_video = tk.BooleanVar(value=False)
+        self.op_subs = tk.StringVar(value="Original")
+        ttk.Checkbutton(top, text="Subtitular el video al terminar", variable=self.op_video).pack(side="left", padx=(18, 4))
+        ttk.Button(top, text="Formato de subtítulos…", command=lambda: self._dialogo_video(solo_formato=True)).pack(side="left")
         self.estado = ttk.Label(top, text="Listo.", foreground="#3a5a8c")
         self.estado.pack(side="right")
 
@@ -828,8 +833,6 @@ class App:
         self.op_word = tk.BooleanVar(value=False)
         self.op_trad = tk.BooleanVar(value=False)
         self.op_dir = tk.StringVar(value="Detectar automáticamente")
-        self.op_video = tk.BooleanVar(value=False)
-        self.op_subs = tk.StringVar(value="Original")
         ttk.Label(opc, text="guarda TXT y SRT siempre", foreground="#666").grid(row=0, column=1, sticky="w", padx=8)
         ttk.Checkbutton(opc, text="Guardar también en Word", variable=self.op_word).grid(row=0, column=2, sticky="w", padx=8)
         ttk.Checkbutton(opc, text="Traducir:", variable=self.op_trad).grid(row=1, column=0, sticky="w", pady=(4, 0))
@@ -840,7 +843,7 @@ class App:
         ttk.Checkbutton(fv, text="Crear video con subtítulos en:", variable=self.op_video).pack(side="left")
         ttk.Combobox(fv, textvariable=self.op_subs, values=["Original", "Traducción", "Ambos"], width=11,
                      state="readonly").pack(side="left", padx=4)
-        ttk.Label(fv, text="(usa tu formato de subtítulos guardado)", foreground="#666").pack(side="left")
+        ttk.Label(fv, text="(con tu formato de subtítulos guardado)", foreground="#666").pack(side="left")
         fd = ttk.Frame(opc)
         fd.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Label(fd, text="Guardar resultados en:").pack(side="left")
@@ -1004,6 +1007,41 @@ class App:
         self.btn_exportar = ttk.Button(af, text="Descargar video con subtítulos",
                                        command=self._dialogo_video, state="disabled")
         self.btn_exportar.pack(side="right", padx=6)
+
+    # ---------- ajustes que se recuerdan ----------
+    def _ajustes_persistentes(self):
+        self._persist = {"modelo": self.modelo, "idioma": self.idioma, "subtitular_al_terminar": self.op_video,
+                         "subtitulos_en": self.op_subs, "guardar_word": self.op_word, "traducir": self.op_trad,
+                         "sentido_traduccion": self.op_dir, "carpeta_resultados": self.op_destino,
+                         "largo_subtitulo": self.tp_largo, "traducir_en_vivo": self.trad_vivo,
+                         "sentido_en_vivo": self.dir_vivo, "sentido_traductor": self.dir_texto}
+        guardados = leer_config().get("ajustes", {})
+        for k, var in self._persist.items():
+            if k in guardados:
+                try:
+                    var.set(guardados[k])
+                except (tk.TclError, ValueError):
+                    pass
+        if not os.path.isdir(self.op_destino.get()):
+            self.op_destino.set(OUT_DIR)
+        self._job_ajustes = None
+        for var in self._persist.values():
+            var.trace_add("write", lambda *a: self._programar_ajustes())
+
+    def _programar_ajustes(self):
+        if self._job_ajustes:
+            self.root.after_cancel(self._job_ajustes)
+        self._job_ajustes = self.root.after(600, self._guardar_ajustes)
+
+    def _guardar_ajustes(self):
+        self._job_ajustes = None
+        d = {}
+        for k, var in self._persist.items():
+            try:
+                d[k] = var.get()
+            except (tk.TclError, ValueError):
+                pass
+        escribir_config(ajustes=d)
 
     # ---------- comunicación entre hilos ----------
     def emit(self, msg):
@@ -1631,7 +1669,9 @@ class App:
         self.btn_exportar.config(state="normal" if tiene_video else "disabled")
         self._autoguardar(srt=True)
         self.estado.config(text=nota)
-        if tiene_video and messagebox.askyesno(
+        if tiene_video and self.op_video.get():
+            self._subtitular_automatico()
+        elif tiene_video and messagebox.askyesno(
                 APP, f"{nota}\n\n{len(segs)} subtítulos cargados. Puedes revisarlos o traducirlos en la lista "
                      "(clic derecho) y verlos con «Ver video con transcripción sincronizada».\n\n"
                      "¿Abrir ahora el editor para crear el video con subtítulos?"):
@@ -1944,6 +1984,8 @@ class App:
             self.estado.config(text=f"Listo · {len(self.segs)} segmentos." +
                                (" (detenido)" if self.stop_evt.is_set() else ""))
             self._autoguardar(srt=True)
+            if self.op_video.get() and not self.stop_evt.is_set():
+                self._subtitular_automatico()
         else:
             self.estado.config(text="Listo.")
 
@@ -1988,16 +2030,24 @@ class App:
         except Exception as e:
             messagebox.showerror(APP, f"No se pudo guardar:\n{e}")
 
-    def _dialogo_video(self):
-        if self.ocupado or not (self.media and self.segs):
+    def _dialogo_video(self, solo_formato=False):
+        if not solo_formato and (self.ocupado or not (self.media and self.segs)):
             return
         from tkinter import colorchooser, font as tkfont
         import tempfile
         cfg = cargar_estilo()
-        _, dur = info_media(self.media)
         media = self.media
+        try:
+            if not (media and info_media(media)[0]):
+                media = None
+        except Exception:
+            media = None
+        if not solo_formato and media is None:
+            return
+        dur = info_media(media)[1] if media else 10
         d = tk.Toplevel(self.root)
-        d.title("Video con subtítulos — formato del texto")
+        d.title("Formato de subtítulos — se guarda y se aplica a todos los videos" if solo_formato
+                else "Video con subtítulos — formato del texto")
         d.transient(self.root)
         f = ttk.Frame(d, padding=12)
         f.pack(fill="both", expand=True)
@@ -2047,10 +2097,11 @@ class App:
         campo("Separación del borde:", ttk.Spinbox(izq, from_=0, to=150, textvariable=v["margen"], width=6))
 
         # vista previa real
-        ttk.Label(der, text="Vista previa (así quedará en el video)").pack(anchor="w")
+        ttk.Label(der, text="Vista previa (así quedará en el video)" if media else
+                  "Vista previa sobre un fondo de muestra").pack(anchor="w")
         lbl = tk.Label(der, text="Generando vista previa…", width=70, height=18, bg="#222", fg="#bbb")
         lbl.pack(pady=(4, 6))
-        t_prev = tk.DoubleVar(value=self.segs[0]["start"] + 0.5 if self.segs else min(5, dur / 3))
+        t_prev = tk.DoubleVar(value=self.segs[0]["start"] + 0.5 if (self.segs and media) else min(5, dur / 3))
         mf = ttk.Frame(der)
         mf.pack(fill="x")
         ttk.Label(mf, text="Momento del video:").pack(side="left")
@@ -2071,6 +2122,8 @@ class App:
             return c
 
         def texto_en(t):
+            if not (self.segs and media):
+                return "Así se verán los subtítulos en tus videos"
             sv = self.segs_vista()
             for s in sv:
                 if s["start"] <= t <= s["end"] + 0.3:
@@ -2115,7 +2168,7 @@ class App:
                 v[k].set(val)
             d.destroy()
             guardar_estilo(dict(SUB_DEFECTO))
-            self._dialogo_video()
+            self._dialogo_video(solo_formato)
 
         def crear():
             c = leer()
@@ -2130,31 +2183,58 @@ class App:
             if os.path.abspath(salida) == os.path.abspath(media):
                 messagebox.showwarning(APP, "Elige otro nombre: no se puede sobrescribir el video original.")
                 return
-            self._ocupar(True)
-            self.stop_evt.clear()
+            self._iniciar_video(media, self.segs_vista(), salida, c)
 
-            def prog(pct, t, dur_):
-                self.emit(("progreso", pct))
-                self._log(f"Creando video con subtítulos… {pct:.0f}% ({ts_corto(t)} de {ts_corto(dur_)})")
-
-            def job():
-                try:
-                    self._log("Creando video con subtítulos…")
-                    ok_ = video_subtitulado(media, self.segs_vista(), salida, c, prog, self.stop_evt)
-                    self.emit(("video_listo", salida if ok_ else None))
-                except Exception as e:
-                    log.exception("video subtitulado")
-                    self.emit(("video_listo", None))
-                    self.emit(("error", str(e)))
-            threading.Thread(target=job, daemon=True).start()
+        def guardar_formato():
+            guardar_estilo(leer())
+            d.destroy()
+            self.estado.config(text="Formato de subtítulos guardado; se aplicará a todos los videos.")
 
         b = ttk.Frame(f)
         b.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         ttk.Button(b, text="Restablecer", command=restablecer).pack(side="left")
-        ttk.Button(b, text="Cancelar", command=lambda: (guardar_estilo(leer()), d.destroy())).pack(side="right")
-        ttk.Button(b, text="Crear video", style="Acc.TButton", command=crear).pack(side="right", padx=6)
+        ttk.Label(b, text="Se guarda en: " + CONFIG_PATH, foreground="#888").pack(side="left", padx=10)
+        ttk.Button(b, text="Cancelar", command=d.destroy).pack(side="right")
+        if solo_formato:
+            ttk.Button(b, text="Guardar formato", style="Acc.TButton", command=guardar_formato).pack(side="right", padx=6)
+        else:
+            ttk.Button(b, text="Crear video", style="Acc.TButton", command=crear).pack(side="right", padx=6)
         generar()
         d.grab_set()
+
+    def _iniciar_video(self, media, segs, salida, cfg):
+        self._ocupar(True)
+        self.stop_evt.clear()
+
+        def prog(pct, t, dur_):
+            self.emit(("progreso", pct))
+            self._log(f"Creando video con subtítulos… {pct:.0f}% ({ts_corto(t)} de {ts_corto(dur_)})")
+
+        def job():
+            try:
+                self._log("Creando video con subtítulos…")
+                ok_ = video_subtitulado(media, segs, salida, cfg, prog, self.stop_evt)
+                self.emit(("video_listo", salida if ok_ else None))
+            except Exception as e:
+                log.exception("video subtitulado")
+                self.emit(("video_listo", None))
+                self.emit(("error", str(e)))
+        threading.Thread(target=job, daemon=True).start()
+
+    def _subtitular_automatico(self):
+        """Estampa la transcripción en el video con el formato guardado."""
+        try:
+            if not (self.media and self.segs and info_media(self.media)[0]):
+                return False
+        except Exception:
+            return False
+        base = os.path.splitext(os.path.basename(self.media))[0] + " - subtitulado.mp4"
+        carpeta = os.path.dirname(self.media)
+        if not os.access(carpeta, os.W_OK):
+            carpeta = OUT_DIR
+        self._iniciar_video(self.media, segs_segun(self.segs, self.op_subs.get()),
+                            os.path.join(carpeta, base), cargar_estilo())
+        return True
 
     def _video_listo(self, salida):
         self._ocupar(False)
@@ -2184,6 +2264,10 @@ class App:
         webbrowser.open("file:///" + ruta.replace("\\", "/").lstrip("/"))
 
     def _salir(self):
+        try:
+            self._guardar_ajustes()
+        except Exception:
+            pass
         self.stop_evt.set()
         if self.captura:
             self.captura.detener()
@@ -2198,25 +2282,64 @@ SUB_DEFECTO = {
 }
 FORMAS_SUB = ["Caja de fondo", "Contorno", "Sombra", "Contorno y sombra", "Sin borde"]
 POSICIONES_SUB = {"Abajo": 2, "Centro": 10, "Arriba": 6}   # numeración SSA de libass
-CFG_SUB = os.path.join(OUT_DIR, "estilo_subtitulos.json")
+# ───────────────────────── configuración permanente ─────────────────────────
+def _carpeta_programa():
+    return os.path.dirname(sys.executable) if CONGELADO else os.path.dirname(os.path.abspath(__file__))
+
+
+def _ruta_config():
+    """configuracion.json en la carpeta del programa; si no se puede escribir ahí, en Documentos."""
+    for carpeta in (_carpeta_programa(), OUT_DIR):
+        ruta = os.path.join(carpeta, "configuracion.json")
+        try:
+            with open(ruta, "a", encoding="utf-8"):
+                pass
+            return ruta
+        except OSError:
+            continue
+    return os.path.join(OUT_DIR, "configuracion.json")
+
+
+CONFIG_PATH = _ruta_config()
+_config_lock = threading.Lock()
+
+
+def leer_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        d = {}
+    if "estilo_subtitulos" not in d:      # formato guardado por versiones anteriores
+        try:
+            with open(os.path.join(OUT_DIR, "estilo_subtitulos.json"), encoding="utf-8") as f:
+                d["estilo_subtitulos"] = json.load(f)
+        except Exception:
+            pass
+    return d
+
+
+def escribir_config(**cambios):
+    with _config_lock:
+        d = leer_config()
+        d.update(cambios)
+        tmp = CONFIG_PATH + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, CONFIG_PATH)
+        except Exception:
+            log.exception("guardar configuración")
 
 
 def cargar_estilo():
     cfg = dict(SUB_DEFECTO)
-    try:
-        with open(CFG_SUB, encoding="utf-8") as f:
-            cfg.update({k: v for k, v in json.load(f).items() if k in SUB_DEFECTO})
-    except Exception:
-        pass
+    cfg.update({k: v for k, v in leer_config().get("estilo_subtitulos", {}).items() if k in SUB_DEFECTO})
     return cfg
 
 
 def guardar_estilo(cfg):
-    try:
-        with open(CFG_SUB, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=1)
-    except Exception:
-        log.exception("guardar estilo")
+    escribir_config(estilo_subtitulos={k: cfg[k] for k in SUB_DEFECTO if k in cfg})
 
 
 def _ass_color(hexcolor, alpha=0):
@@ -2313,8 +2436,9 @@ def vista_previa_subs(media, texto, cfg, t, salida_png, ancho=560):
     tmp = tempfile.mkdtemp(prefix="transcriptor_prev_")
     with open(os.path.join(tmp, "subs.srt"), "w", encoding="utf-8") as f:
         f.write(_srt_estilo([{"start": 0, "end": 3600, "text": texto, "src": ""}], cfg))
-    cmd = [exe, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{max(0, t):.2f}",
-           "-i", os.path.abspath(media), "-frames:v", "1",
+    entrada = (["-ss", f"{max(0, t):.2f}", "-i", os.path.abspath(media)] if media else
+               ["-f", "lavfi", "-i", "color=c=0x34495e:s=1280x720:d=1"])
+    cmd = [exe, "-y", "-hide_banner", "-loglevel", "error"] + entrada + ["-frames:v", "1",
            "-vf", _filtro_subs(cfg) + f",scale={ancho}:-2", os.path.abspath(salida_png)]
     r = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=60, creationflags=_SIN_VENTANA)

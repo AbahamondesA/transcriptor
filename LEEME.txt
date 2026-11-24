@@ -49,6 +49,13 @@ VIDEO + TEXTO PROPIO (pestaña 5)
 - Luego puedes revisar o traducir líneas (clic derecho) y crear el video con subtítulos.
 
 VIDEO CON SUBTÍTULOS INTEGRADOS
+- Arriba de la ventana: "Subtitular el video al terminar". Si está marcado, cada video
+  que transcribas (archivo, enlace, cola o video + texto propio) se entrega también como
+  "nombre - subtitulado.mp4" junto al original, sin preguntar.
+- "Formato de subtítulos…": define una vez la fuente, tamaño, colores, borde, caja y
+  posición. Queda guardado en configuracion.json (carpeta del programa) y se aplica a
+  todos los videos hasta que lo cambies. La aplicación también recuerda modelo, idioma
+  y las opciones de la cola.
 - Después de transcribir un video (archivo o enlace), usa "Descargar video con subtítulos".
   Se abre un editor con vista previa real donde controlas tipo de letra, tamaño,
   negrita/cursiva/mayúsculas, color del texto, forma (caja, contorno, sombra),
